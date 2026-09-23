@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { execFileSync } from 'node:child_process';
-const root=process.cwd();
 const secret=parseEnv(fs.readFileSync('.env.local','utf8')).OPENAI_API_KEY;
 if (!secret||secret.length<20) throw Error('Local key is missing; its value is not printed.');
 let inspected=0;

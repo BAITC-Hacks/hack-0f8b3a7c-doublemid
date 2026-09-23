@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- Node preload must remain CommonJS on Windows. */
 // Some restricted Windows runtimes cannot resolve the current account through libuv.
 const os = require('node:os');
 const original = os.userInfo;

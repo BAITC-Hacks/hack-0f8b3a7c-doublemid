@@ -24,9 +24,9 @@ try {
   const address = await mf.ready;
   const base = address.origin;
   const db = await mf.getD1Database('DB');
-  const sql = await readFile(resolve(root, 'drizzle/0000_keen_iron_lad.sql'), 'utf8');
-  for (const statement of sql.split('--> statement-breakpoint').map(s => s.trim()).filter(Boolean)) {
-    await db.prepare(statement).run();
+  for (const migration of (await readdir(resolve(root, 'drizzle'))).filter(f => f.endsWith('.sql')).sort()) {
+    const sql = await readFile(resolve(root, 'drizzle', migration), 'utf8');
+    for (const statement of sql.split('--> statement-breakpoint').map(s => s.trim()).filter(Boolean)) await db.prepare(statement).run();
   }
   const response = await fetch(base);
   assert.equal(response.status, 200);
