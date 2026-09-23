@@ -1,57 +1,273 @@
 "use client";
-import { useEffect, useState } from 'react';
-import { ArrowUpRight, Plus, Sparkles, BriefcaseBusiness, GraduationCap, Search, ArrowLeft, Check, FileText, ExternalLink, Loader2, Trophy } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowLeft, ArrowRight, Check, FileText, Loader2, Plus, Search, SlidersHorizontal, CircleHelp, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Progress } from '@/components/ui/progress';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
-import { fieldDefs, teams, topics, blankTask, scoreTask, readiness, level, isFilled, seedDrafts, AI_PROMPT, type Task, type Proposal, type FieldKey } from '@/lib/domain';
+import { Picker, Rating, TaskList, ProposalCard } from '@/components/hub/workspace-ui';
+import { aiNotice, type AIResult, type AIStatus, type AIQuestion } from '@/lib/ai-types';
+import { plural } from '@/lib/format';
+import { EDITOR_CACHE_KEY, OFFER_CACHE_KEY, restoreEditor, restoreOffer } from '@/lib/editor-cache';
+import { fieldDefs, teams, topics, blankTask, readiness, level, isFilled, seedDrafts, questionsFor, type Task, type Proposal } from '@/lib/domain';
 
-type Question={key:FieldKey;text:string};
-const statusText={pending:'На рассмотрении',chosen:'Команда выбрана',rejected:'Отклонено'};
-function Picker({value,onChange,items,label}:{value:string;onChange:(v:string)=>void;items:{value:string;label:string}[];label:string}){return <Select value={value} onValueChange={onChange}><SelectTrigger aria-label={label} className="bg-white min-w-[150px] h-10"><SelectValue/></SelectTrigger><SelectContent>{items.map(i=><SelectItem key={i.value} value={i.value}>{i.label}</SelectItem>)}</SelectContent></Select>}
-function Rating({task,preview=false}:{task:Task;preview?:boolean}){const score=scoreTask(task,preview||task.confirmed);return <aside className="surface rating-aside"><div className="eyebrow">{preview?'ПРЕДВАРИТЕЛЬНАЯ ОЦЕНКА':'РЕЙТИНГ ГОТОВНОСТИ'}</div><div className="big-score">{score}<small> / 100</small></div><p className="help">{readiness(score)}</p><Progress value={score} aria-label="Рейтинг готовности" className="my-5 h-1.5"/>{fieldDefs.map(f=><div className="score-row" key={f.key}><span>{f.label}</span><b className={isFilled(task[f.key])?'text-[#436b38]':'text-[#89938d]'}>{isFilled(task[f.key])&&(preview||task.confirmed)?f.points:0} / {f.points}</b></div>)}<p className="help mt-4">{preview?'Баллы будут начислены после вашего подтверждения.':'Баллы начислены за заполненные и подтверждённые сведения.'}</p>{fieldDefs.some(f=>!isFilled(task[f.key]))&&<div className="notice mt-4 mb-0"><b>Следующий шаг</b><br/>Добавьте: {fieldDefs.find(f=>!isFilled(task[f.key]))?.label.toLowerCase()}. Это повысит готовность задачи.</div>}</aside>}
-export default function Home(){
- const [tasks,setTasks]=useState<Task[]>([]),[proposals,setProposals]=useState<Proposal[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState(''),[busy,setBusy]=useState(false);
- const [role,setRole]=useState('business'),[team,setTeam]=useState('t1'),[tab,setTab]=useState('catalog'),[query,setQuery]=useState(''),[topic,setTopic]=useState('all'),[ready,setReady]=useState('all');
- const [draft,setDraft]=useState<Task>(blankTask),[step,setStep]=useState(0),[questions,setQuestions]=useState<Question[]>([]),[confirmed,setConfirmed]=useState(false);
- const [selected,setSelected]=useState<string|null>(null),[apply,setApply]=useState(false),[offer,setOffer]=useState({idea:'',plan:'',term:'',link:''});
- const [milestone,setMilestone]=useState<string|null>(null),[evidence,setEvidence]=useState('');
- const task=tasks.find(t=>t.id===selected),activeTeam=teams.find(t=>t.id===team)!;
- async function load(){setLoading(true);setError('');try{const r=await fetch('/api/workspace');const d=await r.json() as {error:string;tasks:Task[];proposals:Proposal[]};if(!r.ok)throw Error(d.error);setTasks(d.tasks);setProposals(d.proposals);}catch(e){setError(e instanceof Error?e.message:'Не удалось загрузить данные.');}finally{setLoading(false)}}
- useEffect(()=>{void load()},[]);
- async function api(action:string,payload:Record<string,unknown>){const r=await fetch('/api/workspace',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...payload})});let d: {error:string;task:Task;proposal:Proposal;questions:Question[]};try{d=await r.json() as typeof d}catch{throw Error('Сервис временно недоступен. Попробуйте ещё раз.')}if(!r.ok)throw Error(d.error||'Не удалось сохранить изменения.');return d;}
- async function run(fn:()=>Promise<void>){if(busy)return;setBusy(true);setError('');try{await fn()}catch(e){const msg=e instanceof Error?e.message:'Не удалось выполнить действие.';setError(msg);toast.error(msg)}finally{setBusy(false)}}
- function editField(key:keyof Task,value:string){setDraft(t=>({...t,[key]:value,confirmed:false}));setConfirmed(false)}
- function startTask(){setTab('builder');setSelected(null);setError('')}
- function editTask(t:Task){setDraft({...t});setConfirmed(false);setStep(2);setSelected(null);setTab('builder')}
- async function ask(){await run(async()=>{const next={...draft,context:draft.context||draft.draft};const d=await api('questions',{task:next});setQuestions(d.questions);setDraft(next);setStep(1)})}
- async function save(publish:boolean){await run(async()=>{const t={...draft,title:draft.title||draft.draft.slice(0,80),confirmed:step===2?confirmed:false,published:publish};if(step===2&&!confirmed)throw Error('Подтвердите проверку сведений.');const d=await api('saveTask',{task:t});setTasks(prev=>[d.task,...prev.filter(x=>x.id!==d.task.id)]);setDraft(d.task);setConfirmed(false);setTab(publish?'catalog':'mine');if(publish)setSelected(d.task.id);toast.success(publish?'Задача опубликована в каталоге':'Черновик сохранён')})}
- async function decide(p:Proposal,status:'chosen'|'rejected'){await run(async()=>{const d=await api('decide',{id:p.id,status});setProposals(prev=>prev.map(x=>x.id===p.id?d.proposal:x));toast.success(status==='chosen'?'Команда выбрана. Можно выбрать и другие команды.':'Предложение отклонено')})}
- function Card({t,index}:{t:Task;index:number}){const count=proposals.filter(p=>p.taskId===t.id).length;return <button className="task-card card-link" onClick={()=>{setSelected(t.id);setApply(false)}}><div className="card-top"><span className="org-icon">{(t.org||'Б').slice(0,1)}</span><span>{t.org||'Без организации'}</span><span className="task-number">{String(index+1).padStart(2,'0')}</span></div><div className="tags"><span>{t.topic}</span><span className={t.score>=70?'ready':''}>{t.published?readiness(t.score):'Не опубликована'}</span></div><h3>{t.title}</h3><p>{(t.need||t.context||t.draft||'Описание ещё не добавлено.').slice(0,150)}</p><div className="rating-line"><span>Готовность задачи</span><b>{t.score}<small>/100</small></b></div><Progress value={t.score} aria-label={`Готовность ${t.score} из 100`} className="mt-2 mb-6 h-1 [&_[data-slot=progress-indicator]]:bg-[#9ebe77]"/><footer><span>{count} {count===1?'отклик':'откликов'}</span><span className="flex gap-2 items-center">Открыть <ArrowUpRight size={17}/></span></footer></button>}
- function ProposalCard({p}:{p:Proposal}){const t=tasks.find(t=>t.id===p.taskId),tm=teams.find(t=>t.id===p.teamId)!;return <article className="proposal"><div className="proposal-title"><div className="flex items-center gap-3"><span className="profile-badge">{tm.initials}</span><div><h3>{tm.name}</h3><div className="subtle mt-1">{tm.skills}</div></div></div><span className={'status '+p.status}>{statusText[p.status]}</span></div><button className="text-sm text-[#365c48] mt-4 underline underline-offset-4 text-left" onClick={()=>{setSelected(p.taskId);setApply(false)}}>{t?.title}</button><p><b>Идея:</b> {p.idea}</p><p><b>План:</b> {p.plan}</p><div className="flex gap-5 flex-wrap text-sm mt-3"><span>Срок: {p.term}</span><a className="inline-flex items-center gap-1 underline underline-offset-4" href={p.link} target="_blank" rel="noopener noreferrer">Прототип <ExternalLink size={13}/></a></div>{p.milestone&&<div className="notice mt-4 mb-0"><Trophy size={18} className="inline mr-2"/><b>Этап подтверждён · +20 баллов</b><br/>{p.evidence}</div>}{role==='business'&&!p.milestone&&<div className="actions">{p.status!=='rejected'&&<Button variant="outline" disabled={busy} onClick={()=>decide(p,'rejected')}>Отклонить</Button>}{p.status!=='chosen'?<Button className="primary" disabled={busy} onClick={()=>decide(p,'chosen')}><Check size={16}/>Выбрать команду</Button>:<Button className="primary" onClick={()=>{setMilestone(p.id);setEvidence('')}}>Подтвердить этап</Button>}</div>}</article>}
- const visible=tasks.filter(t=>t.published).filter(t=>(topic==='all'||t.topic===topic)&&(ready==='all'||level(t.score)===ready)&&`${t.title} ${t.org} ${t.need}`.toLowerCase().includes(query.toLowerCase())).sort((a,b)=>b.score-a.score||b.createdAt.localeCompare(a.createdAt));
- const shownProposals=role==='business'?proposals:proposals.filter(p=>p.teamId===team);
- useEffect(()=>{const ctx=(document as unknown as {modelContext?:{registerTool:(tool:unknown,options?:unknown)=>unknown}}).modelContext;if(!ctx?.registerTool)return;const ac=new AbortController();try{Promise.resolve(ctx.registerTool({name:'filter_task_catalog',title:'Фильтровать каталог задач',description:'Показывает опубликованные задачи по теме и уровню готовности. Не создаёт отклики и не выбирает команды.',inputSchema:{type:'object',properties:{topic:{type:'string',enum:['all',...topics]},level:{type:'string',enum:['all','draft','working','ready','priority']}},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute:async(input:unknown)=>{const p=input as {topic?:string;level?:string};if(!p||typeof p!=='object'||(p.topic&&!['all',...topics].includes(p.topic))||(p.level&&!['all','draft','working','ready','priority'].includes(p.level)))throw Error('Неизвестный фильтр');setTopic(p.topic||'all');setReady(p.level||'all');setQuery('');setTab('catalog');await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return {tasks:tasks.filter(t=>t.published&&(!p.topic||p.topic==='all'||t.topic===p.topic)&&(!p.level||p.level==='all'||level(t.score)===p.level)).map(t=>({title:t.title,score:t.score}))}}} ,{signal:ac.signal})).catch(()=>{})}catch{}return()=>ac.abort()},[tasks]);
- return <div className="app"><Toaster position="bottom-right"/><header className="topbar"><a className="brand" href="/">ai<span>sana</span><i>ПРАКТИКА</i></a><div className="owner">МНВО · AI Sana</div><div className="role-control"><Picker label="Роль в демонстрации" value={role} onChange={v=>{setRole(v);setSelected(null);setTab('catalog')}} items={[{value:'business',label:'Бизнес'},{value:'student',label:'Студенческая команда'}]}/>{role==='student'&&<Picker label="Команда" value={team} onChange={setTeam} items={teams.map(t=>({value:t.id,label:t.name}))}/>}</div></header><main className="workspace"><Tabs className="top-tabs" value={tab} onValueChange={setTab}><TabsList variant="line"><TabsTrigger value="catalog">Каталог задач</TabsTrigger>{role==='business'&&<TabsTrigger value="mine">Мои задачи</TabsTrigger>}<TabsTrigger value="offers">{role==='business'?'Отклики команд':'Мои отклики'}<span className="ml-1 text-xs opacity-60">{shownProposals.length}</span></TabsTrigger><TabsTrigger value="guide">Как это работает</TabsTrigger>{tab==='builder'&&<TabsTrigger value="builder">Конструктор</TabsTrigger>}</TabsList></Tabs>
- {error&&<div className="error" role="alert">{error} <button className="underline ml-3" onClick={()=>load()}>Обновить данные</button></div>}
- {tab==='catalog'&&<><div className="eyebrow">БИЗНЕС × СТУДЕНЧЕСКИЕ КОМАНДЫ</div><div className="page-heading"><div><h1>Задачи с реальным смыслом<span>.</span></h1><p>Выберите вызов. Предложите решение. Создайте результат.</p></div>{role==='business'&&<Button className="primary" onClick={startTask}><Plus size={18}/>{draft.draft?'Продолжить задачу':'Создать задачу'}</Button>}</div><div className="intro-grid"><section className="dark-panel"><Sparkles size={26}/><h2>Хорошее решение начинается<br/>с понятной задачи.</h2><p>AI-помощник задаст нужные вопросы и поможет подготовить карточку для команды.</p><button className="panel-label" onClick={()=>role==='business'?startTask():setTab('guide')}>{role==='business'?'СОЗДАТЬ С AI-ПОМОЩНИКОМ':'КАК ВЫБРАТЬ ЗАДАЧУ'}<ArrowUpRight size={18}/></button></section><section className="stat-panel"><BriefcaseBusiness/><strong>{String(tasks.filter(t=>t.published).length).padStart(2,'0')}</strong><span>открытых задач</span><p>Любой команде. Без назначений.</p></section><section className="stat-panel"><GraduationCap/><strong>05</strong><span>студенческих команд</span><p>Навыки, которые работают.</p></section></div><div className="section-heading"><h2>Каталог задач <span className="subtle ml-2">{visible.length}</span></h2><span>Сначала самые готовые</span></div><div className="toolbar"><div className="relative flex-1 min-w-[220px] max-w-[340px]"><Search className="absolute left-3 top-3 text-[#829089]" size={16}/><Input aria-label="Поиск задач" className="pl-10 bg-white h-10" placeholder="Название, компания или задача" value={query} onChange={e=>setQuery(e.target.value)}/></div><Picker label="Тема" value={topic} onChange={setTopic} items={[{value:'all',label:'Все темы'},...topics.map(t=>({value:t,label:t}))]}/><Picker label="Уровень готовности" value={ready} onChange={setReady} items={[{value:'all',label:'Любая готовность'},{value:'priority',label:'90–100 · Приоритетная'},{value:'ready',label:'70–89 · Готовая'},{value:'working',label:'40–69 · Рабочая'},{value:'draft',label:'0–39 · Уточнить'}]}/>{(query||topic!=='all'||ready!=='all')&&<Button variant="ghost" onClick={()=>{setQuery('');setTopic('all');setReady('all')}}>Сбросить</Button>}</div>{loading?<div className="cards">{[1,2,3].map(n=><Skeleton key={n} className="h-80 rounded-xl"/>)}</div>:visible.length?<div className="cards">{visible.map((t,i)=><Card key={t.id} t={t} index={i}/>)}</div>:<div className="empty-state"><Search className="mx-auto"/><h2>Задачи не найдены</h2><p>Попробуйте изменить поиск или фильтры.</p></div>}</>}
- {tab==='mine'&&<><div className="page-heading"><div><h1>Мои задачи<span>.</span></h1><p>Черновики и опубликованные карточки в вашей учебной среде.</p></div><Button className="primary" onClick={()=>{setDraft(blankTask());setStep(0);setConfirmed(false);setQuestions([]);startTask()}}><Plus size={18}/>Новая задача</Button></div><div className="cards">{tasks.map((t,i)=><Card key={t.id} t={t} index={i}/>)}</div></>}
- {tab==='builder'&&role==='business'&&<><div className="page-heading"><div><div className="eyebrow">КОНСТРУКТОР ЗАДАЧИ</div><h1>{step===0?'Начнём с вашей идеи':step===1?'Добавим важные детали':'Проверьте карточку'}<span>.</span></h1><p>{step===0?'Расскажите своими словами, что хотите улучшить.':step===1?'Не знаете ответ? Оставьте поле пустым и вернитесь к нему позже.':'Отредактируйте сведения и подтвердите их перед публикацией.'}</p></div></div><div className="steps">{['01 · Черновик','02 · Уточнение','03 · Карточка'].map((s,i)=><button key={s} className={'step '+(step===i?'active':'')} disabled={i>step} onClick={()=>setStep(i)}>{s}</button>)}</div><div className="builder"><section className="surface">{step===0?<><h2>Какую задачу нужно решить?</h2><div className="field"><label htmlFor="draft">Описание потребности</label><Textarea id="draft" rows={6} style={{minHeight:170}} placeholder="Например: заявки клиентов приходят из разных каналов, и менеджеры теряют часть обращений. Хотим автоматизировать обработку." value={draft.draft} maxLength={3000} onChange={e=>editField('draft',e.target.value)}/><p>Не нужно готовить техническое задание. Начните с проблемы.</p></div><div className="field"><label>Тема задачи</label><Picker label="Тема новой задачи" value={draft.topic} onChange={v=>editField('topic',v)} items={topics.map(t=>({value:t,label:t}))}/></div><div className="field"><label>Или возьмите учебный пример</label><div className="flex flex-wrap gap-2">{seedDrafts.map((d,i)=><Button key={i} variant="outline" onClick={()=>{setDraft({...blankTask(),draft:d.text,topic:d.topic});setConfirmed(false)}}>{d.topic}</Button>)}</div></div><div className="notice"><Sparkles size={17} className="inline mr-2"/>AI-помощник · демо-режим. Уточняет сведения по правилам, без внешней нейросети.</div><div className="actions"><Button variant="outline" disabled={busy||draft.draft.length<10} onClick={()=>save(false)}>Сохранить черновик</Button><Button className="primary" disabled={busy||draft.draft.trim().length<10} onClick={ask}>{busy?<Loader2 className="animate-spin" size={16}/>:<Sparkles size={16}/>}Уточнить задачу</Button></div></>:step===1?<><div className="notice">В описании не хватает сведений для старта работы. Ответьте на вопросы ниже — ваши формулировки войдут в карточку без добавления фактов.</div>{questions.map(q=><div className="field" key={q.key}><label htmlFor={'q-'+q.key}>{q.text} <span className="subtle">+{fieldDefs.find(f=>f.key===q.key)?.points}</span></label><Textarea id={'q-'+q.key} value={draft[q.key]} maxLength={3000} placeholder="Ваш ответ" onChange={e=>editField(q.key,e.target.value)}/></div>)}<div className="actions"><Button variant="outline" onClick={()=>setStep(0)}><ArrowLeft size={16}/>Назад</Button><Button className="primary" onClick={()=>{setDraft(t=>({...t,title:t.title||t.draft.slice(0,80)}));setStep(2);setConfirmed(false)}}>Собрать карточку<ArrowUpRight size={17}/></Button></div></>:<><div className="two-cols"><div className="field"><label htmlFor="title">Название *</label><Input id="title" maxLength={160} value={draft.title} onChange={e=>editField('title',e.target.value)}/></div><div className="field"><label htmlFor="org">Организация *</label><Input id="org" maxLength={100} placeholder="Название бизнеса" value={draft.org} onChange={e=>editField('org',e.target.value)}/></div></div><div className="field"><label>Тема</label><Picker label="Тема карточки" value={draft.topic} onChange={v=>editField('topic',v)} items={topics.map(t=>({value:t,label:t}))}/></div>{fieldDefs.map(f=><div className="field" key={f.key}><label htmlFor={f.key}>{f.label} <span className="subtle">· {f.points} баллов</span></label><Textarea id={f.key} value={draft[f.key]} maxLength={3000} placeholder={f.question} onChange={e=>editField(f.key,e.target.value)}/>{!isFilled(draft[f.key])&&<p>Пока не засчитывается. Нужен содержательный ответ от 8 символов.</p>}</div>)}<label className="field-check"><Checkbox checked={confirmed} onCheckedChange={v=>setConfirmed(v===true)} className="mt-1"/><span>Я проверил(а) заполненные сведения и подтверждаю их достоверность. Незаполненные поля останутся открытыми вопросами.</span></label><div className="actions"><Button variant="outline" disabled={busy} onClick={ask}>Уточнить ещё</Button>{!draft.published&&<Button variant="outline" disabled={busy||!confirmed} onClick={()=>save(false)}>Сохранить</Button>}<Button className="primary" disabled={busy||!confirmed} onClick={()=>save(true)}>{busy?<Loader2 className="animate-spin" size={16}/>:<Check size={16}/>} {draft.published?'Подтвердить изменения':'Опубликовать задачу'}</Button></div></>}</section><Rating task={draft} preview/></div></>}
- {tab==='offers'&&<><div className="page-heading"><div><h1>{role==='business'?'Команды предлагают решения':'Ваши предложения'}<span>.</span></h1><p>{role==='business'?'Сравните подходы и выберите одну, несколько или ни одной команды.':'Откликайтесь на интересные задачи и отслеживайте решения бизнеса.'}</p></div></div>{role==='student'&&<div className="surface team-summary"><span className="profile-badge">{activeTeam.initials}</span><div><h2>{activeTeam.name}</h2><p className="subtle">{activeTeam.skills} · Интересы: {activeTeam.interests}</p></div><div className="ml-auto text-right"><b className="text-3xl text-[#456338]">{proposals.filter(p=>p.teamId===team&&p.milestone).length*20}</b><p className="subtle">баллов за результат</p></div></div>}{shownProposals.length?shownProposals.map(p=><ProposalCard key={p.id} p={p}/>):<div className="empty-state"><FileText className="mx-auto"/><h2>Пока нет откликов</h2><p>{role==='student'?'Найдите задачу в каталоге и предложите свой подход.':'Опубликуйте задачу и дождитесь предложений команд.'}</p><Button className="primary mt-5" onClick={()=>setTab('catalog')}>В каталог</Button></div>}</>}
- {tab==='guide'&&<section className="surface reading"><div className="eyebrow">ПРАКТИКА AI SANA</div><h1>От идеи к результату<span>.</span></h1><h2>Для бизнеса</h2><ol className="list-decimal pl-5"><li>Опишите проблему. Помощник задаст не менее трёх уточняющих вопросов.</li><li>Проверьте карточку, заполните недостающие поля и подтвердите сведения.</li><li>Опубликуйте задачу. Рейтинг определит её позицию в каталоге.</li><li>Сравните отклики и вручную выберите команды. После проверки этапа подтвердите результат.</li></ol><h2>Для студенческих команд</h2><p>Все опубликованные задачи доступны независимо от рейтинга. Отправьте идею, план, срок и ссылку на прототип. Число предложений не ограничено. За подтверждённый бизнесом этап команда получает 20 баллов.</p><h2>Как работает рейтинг</h2><p>Контекст и потребность — 20, данные — 20, результат — 15, критерии успеха — 15, ограничения — 10, пользователи — 10, связь с бизнесом — 10. Заполненность проверяется по наличию ответа от 8 символов; «не знаю» и аналогичные заглушки не засчитываются. Это оценка полноты, а не экспертная оценка качества идеи.</p><p>0–39 — требует уточнения; 40–69 — рабочая; 70–89 — готовая; 90–100 — приоритетная. Низкий рейтинг не скрывает задачу и не запрещает отклик.</p><h2>Об этой версии</h2><p>Это учебная среда для хакатона. Роль переключается вверху, все компании и профили синтетические, ссылки example.com демонстрационные. Данные сохраняются на сервере в рабочем пространстве этого браузера. Это не регистрация отдельных бизнесов и команд.</p><p>AI-помощник работает как разрешённая кейсом локальная заглушка: выбирает вопросы по недостающим полям и теме описания. Внешняя нейросеть не подключена. Ответы переносятся без выдуманных фактов; неполный или некорректный структурированный ответ заменяется безопасным набором вопросов.</p><details className="border rounded-lg p-4"><summary className="cursor-pointer font-medium">Промпт и формат AI-обмена</summary><p className="mt-4 text-sm">{AI_PROMPT}</p><pre className="text-xs overflow-x-auto bg-[#edf1f3] p-3 rounded">{'Вход: {draft, topic, fields}\nВыход: {questions: [{key: "data", text: "Какие данные доступны?"}, …]}\nНекорректный JSON: резервные вопросы, ввод пользователя сохраняется.'}</pre></details></section>}
- <footer className="footer-note"><span>AI Sana · Практические задачи · МНВО</span><span>Учебная среда · Синтетические данные · AI в демо-режиме</span></footer></main>
- <Sheet open={!!task} onOpenChange={v=>{if(!v){setSelected(null);setApply(false)}}}><SheetContent className="w-full sm:max-w-[680px] gap-0 bg-white"><SheetHeader className="p-7 pb-4"><SheetTitle className="text-2xl leading-tight pr-7">{task?.title}</SheetTitle><SheetDescription>{task?.org} · {task?.topic}</SheetDescription></SheetHeader>{task&&<div className="sheet-body"><div className="tags mt-0"><span className="ready">{readiness(task.score)} · {task.score}/100</span><span>{task.published?'Опубликована':'Не опубликована'}</span></div>{role==='business'&&<Button className="mb-5" variant="outline" onClick={()=>editTask(task)}>Редактировать карточку</Button>}{fieldDefs.map(f=><div className="detail-block" key={f.key}><h3>{f.label}<span className="subtle ml-2">{task.confirmed&&isFilled(task[f.key])?f.points:0}/{f.points}</span></h3><p className={!task[f.key]?'text-[#8b969c]':''}>{task[f.key]||'Нужно уточнить у бизнеса'}</p></div>)}{role==='student'&&task.published&&<div className="mt-6">{!apply?<><p className="help mb-4">Предложите подход от команды {activeTeam.name}. Отклик открыт при любом рейтинге.</p><Button className="primary w-full" onClick={()=>{setOffer({idea:'',plan:'',term:'',link:''});setApply(true)}}>Предложить решение<ArrowUpRight size={17}/></Button></>:<form onSubmit={e=>{e.preventDefault();void run(async()=>{const d=await api('propose',{proposal:{...offer,teamId:team,taskId:task.id}});setProposals(prev=>[d.proposal,...prev]);setApply(false);setSelected(null);setTab('offers');toast.success('Предложение отправлено бизнесу')})}}><h2 className="mb-4">Предложение от {activeTeam.name}</h2>{([{key:'idea',label:'Идея решения',placeholder:'Какой подход вы предлагаете?'},{key:'plan',label:'План работы',placeholder:'Опишите основные шаги'}] as const).map(f=><div className="field" key={f.key}><label htmlFor={'offer-'+f.key}>{f.label} *</label><Textarea id={'offer-'+f.key} required minLength={8} maxLength={3000} placeholder={f.placeholder} value={offer[f.key]} onChange={e=>setOffer(o=>({...o,[f.key]:e.target.value}))}/></div>)}<div className="field"><label htmlFor="term">Срок *</label><Input id="term" required minLength={2} maxLength={100} value={offer.term} placeholder="Например, 3 недели" onChange={e=>setOffer(o=>({...o,term:e.target.value}))}/></div><div className="field"><label htmlFor="prototype">Ссылка на прототип *</label><Input type="url" id="prototype" required maxLength={500} value={offer.link} placeholder="https://…" onChange={e=>setOffer(o=>({...o,link:e.target.value}))}/></div><div className="actions"><Button type="button" variant="outline" onClick={()=>setApply(false)}>Отмена</Button><Button className="primary" disabled={busy} type="submit">{busy?'Отправка…':'Отправить предложение'}</Button></div></form>}</div>}{role==='business'&&<div className="mt-7"><h2>Предложения команд</h2>{proposals.filter(p=>p.taskId===task.id).length?proposals.filter(p=>p.taskId===task.id).map(p=><ProposalCard key={p.id} p={p}/>):<p className="help mt-3">Пока нет предложений. Студенты смогут откликнуться после публикации.</p>}</div>}</div>}</SheetContent></Sheet>
- <Dialog open={!!milestone} onOpenChange={v=>{if(!v)setMilestone(null)}}><DialogContent><DialogHeader><DialogTitle>Подтвердить фактический результат</DialogTitle><DialogDescription>Укажите, какой этап выполнен и что вы проверили. Команда получит 20 баллов один раз за этот отклик.</DialogDescription></DialogHeader><label htmlFor="evidence" className="text-sm font-medium">Результат и подтверждение</label><Textarea id="evidence" value={evidence} maxLength={1500} placeholder="Например: проверен прототип на 20 тестовых заявках, 18 распределены верно. Ссылка на отчёт…" onChange={e=>setEvidence(e.target.value)}/><Button className="primary" disabled={busy||!isFilled(evidence)} onClick={()=>run(async()=>{const d=await api('milestone',{id:milestone,evidence});setProposals(prev=>prev.map(p=>p.id===milestone?d.proposal:p));setMilestone(null);toast.success('Этап подтверждён. Команде начислено 20 баллов.')})}>Подтвердить и начислить баллы</Button></DialogContent></Dialog>
- </div>
+type Offer = { idea: string; plan: string; term: string; link: string };
+const blankOffer = (): Offer => ({ idea: '', plan: '', term: '', link: '' });
+const proposalFilters = [{ value: 'all', label: 'Все' }, { value: 'pending', label: 'На рассмотрении' }, { value: 'chosen', label: 'Выбраны' }, { value: 'completed', label: 'Этап завершён' }, { value: 'rejected', label: 'Отклонены' }];
+const offerStatus = (p: Proposal) => p.milestone ? 'completed' : p.status;
+
+export default function Home() {
+  const [ai, setAI] = useState<AIStatus | null>(null), [aiResult, setAIResult] = useState<AIResult | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]), [proposals, setProposals] = useState<Proposal[]>([]);
+  const [loading, setLoading] = useState(true), [error, setError] = useState(''), [busy, setBusy] = useState(false);
+  const busyRef = useRef(false), offerRequestId = useRef('');
+  const [role, setRole] = useState('business'), [team, setTeam] = useState('t1'), [tab, setTab] = useState('catalog');
+  const [query, setQuery] = useState(''), [topic, setTopic] = useState('all'), [ready, setReady] = useState('all'), [proposalFilter, setProposalFilter] = useState('all');
+  const [draft, setDraft] = useState<Task>(blankTask), [step, setStep] = useState(0), [maxStep, setMaxStep] = useState(0);
+  const [questions, setQuestions] = useState<AIQuestion[]>([]), [confirmed, setConfirmed] = useState(false), [dirty, setDirty] = useState(false);
+  const [cacheReady, setCacheReady] = useState(false), [cacheAvailable, setCacheAvailable] = useState(true);
+  const [selected, setSelected] = useState<string | null>(null), [apply, setApply] = useState(false), [offer, setOffer] = useState<Offer>(blankOffer);
+  const [milestone, setMilestone] = useState<string | null>(null), [evidence, setEvidence] = useState('');
+  const [pendingAction, setPendingAction] = useState<{ message: string; action: () => void } | null>(null);
+  const task = tasks.find(t => t.id === selected), activeTeam = teams.find(t => t.id === team)!;
+  const business = role === 'business';
+
+  async function load() {
+    try {
+      const response = await fetch('/api/workspace', { signal: AbortSignal.timeout(15000) });
+      const data = await response.json() as { error?: string; tasks: Task[]; proposals: Proposal[]; ai: AIStatus };
+      if (!response.ok) throw Error(data.error || 'Не удалось загрузить данные.');
+      setTasks(data.tasks); setProposals(data.proposals); setAI(data.ai);
+      return data;
+    } catch (e) { setError(e instanceof Error && !['TypeError', 'TimeoutError'].includes(e.name) ? e.message : 'Нет связи с сервером. Повторите загрузку.'); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => {
+    let cancelled = false;
+    async function initialize() {
+      const workspace = await load();
+      if (cancelled) return;
+      try {
+        const saved = restoreEditor(sessionStorage.getItem(EDITOR_CACHE_KEY));
+        if (saved) { setDraft(saved.task); setQuestions(saved.questions); setStep(saved.step); setMaxStep(saved.maxStep); setDirty(true); }
+        const savedOffer = restoreOffer(sessionStorage.getItem(OFFER_CACHE_KEY));
+        if (savedOffer && (!workspace || workspace.tasks.some(t => t.id === savedOffer.taskId && t.published))) {
+          setOffer(savedOffer.offer); setTeam(savedOffer.teamId); setRole('student');
+          offerRequestId.current = savedOffer.requestId; setSelected(savedOffer.taskId); setApply(true);
+        }
+      } catch { setCacheAvailable(false); }
+      setCacheReady(true);
+    }
+    void initialize();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!cacheReady) return;
+    function persist() {
+      try {
+        if (dirty) sessionStorage.setItem(EDITOR_CACHE_KEY, JSON.stringify({ task: draft, step, maxStep, questions }));
+        else sessionStorage.removeItem(EDITOR_CACHE_KEY);
+      } catch { setCacheAvailable(false); }
+    }
+    // Commit browser storage after paint; flush pending input when navigating away.
+    const frame = requestAnimationFrame(persist);
+    window.addEventListener('pagehide', persist);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener('pagehide', persist); };
+  }, [draft, step, maxStep, questions, dirty, cacheReady]);
+  useEffect(() => {
+    if (!cacheReady) return;
+    function persist() {
+      try {
+        if (apply && selected && Object.values(offer).some(v => v.trim())) {
+          sessionStorage.setItem(OFFER_CACHE_KEY, JSON.stringify({ taskId: selected, teamId: team, requestId: offerRequestId.current, offer }));
+        } else sessionStorage.removeItem(OFFER_CACHE_KEY);
+      } catch { setCacheAvailable(false); }
+    }
+    const frame = requestAnimationFrame(persist);
+    window.addEventListener('pagehide', persist);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener('pagehide', persist); };
+  }, [offer, apply, selected, team, cacheReady]);
+  useEffect(() => {
+    document.getElementById('page-title')?.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }, [tab, step]);
+  async function api(action: string, payload: Record<string, unknown>) {
+    let response: Response;
+    try { response = await fetch('/api/workspace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...payload }), signal: AbortSignal.timeout(25000) }); }
+    catch { throw Error('Не удалось получить ответ сервера. Ввод сохранён в форме. Проверьте связь и обновите данные перед повторной отправкой.'); }
+    let data: { error?: string; task: Task; proposal: Proposal } & AIResult;
+    try { data = await response.json(); } catch { throw Error('Сервис временно недоступен. Ввод сохранён в форме.'); }
+    if (!response.ok) throw Error(data.error || 'Не удалось сохранить изменения.');
+    return data;
+  }
+  async function run(fn: () => Promise<void>) {
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true); setError('');
+    try { await fn(); } catch (e) { const message = e instanceof Error ? e.message : 'Не удалось выполнить действие.'; setError(message); toast.error(message); }
+    finally { busyRef.current = false; setBusy(false); }
+  }
+  function editField(key: keyof Task, value: string) {
+    setDraft(previous => ({ ...previous, [key]: value, ...(key === 'draft' && previous.context === previous.draft ? { context: value } : {}), confirmed: false }));
+    setDirty(true); setConfirmed(false);
+  }
+  function guardEditor(action: () => void) {
+    if (dirty) setPendingAction({ message: 'В форме есть несохранённые изменения. Вернитесь к ней и сохраните черновик или продолжите без этих изменений.', action });
+    else action();
+  }
+  function startNew() { guardEditor(() => { setDraft(blankTask()); setQuestions([]); setAIResult(null); setStep(0); setMaxStep(0); setConfirmed(false); setDirty(false); setError(''); setSelected(null); setTab('builder'); }); }
+  function openTask(id: string) { setSelected(id); setApply(false); setError(''); }
+  function editTask(value: Task) { guardEditor(() => { setDraft({ ...value }); setQuestions(questionsFor(value)); setAIResult(null); setStep(2); setMaxStep(2); setConfirmed(false); setDirty(false); setSelected(null); setError(''); setTab('builder'); }); }
+  function closeTask() {
+    if (busyRef.current) return;
+    if (apply && Object.values(offer).some(v => v.trim())) setPendingAction({ message: 'Отклик ещё не отправлен. Вернитесь к форме, чтобы закончить его, или закройте без сохранения.', action: () => { setSelected(null); setApply(false); setOffer(blankOffer()); } });
+    else { setSelected(null); setApply(false); setError(''); }
+  }
+  function changeRole(value: string) { setRole(value); setTab('catalog'); setSelected(null); setProposalFilter('all'); setError(''); }
+  function clearFilters() { setQuery(''); setTopic('all'); setReady('all'); }
+  async function ask() {
+    await run(async () => {
+      const next = { ...draft, context: draft.context || draft.draft };
+      const result = await api('questions', { task: next });
+      setQuestions(result.questions); setAIResult(result); setDraft(next); setDirty(true); setStep(1); setMaxStep(value => Math.max(value, 1)); setConfirmed(false);
+    });
+  }
+  async function save(publish: boolean) {
+    await run(async () => {
+      if (publish && !confirmed) throw Error('Подтвердите проверку сведений.');
+      const result = await api('saveTask', { task: { ...draft, title: draft.title.trim() || draft.draft.slice(0, 80), confirmed: publish && confirmed, published: publish } });
+      setTasks(values => [result.task, ...values.filter(t => t.id !== result.task.id)]);
+      setDraft(blankTask()); setStep(0); setMaxStep(0); setDirty(false); setQuestions([]); setConfirmed(false); setAIResult(null);
+      clearFilters(); setTab(publish ? 'catalog' : 'mine');
+      if (publish) openTask(result.task.id);
+      toast.success(publish ? 'Задача опубликована в каталоге' : 'Черновик сохранён');
+    });
+  }
+  async function decide(p: Proposal, status: 'chosen' | 'rejected') {
+    await run(async () => {
+      const result = await api('decide', { id: p.id, status });
+      setProposals(values => values.map(value => value.id === p.id ? result.proposal : value));
+      toast.success(status === 'chosen' ? 'Команда выбрана. Можно выбрать и другие команды.' : 'Предложение отклонено');
+    });
+  }
+  function startOffer() { offerRequestId.current = crypto.randomUUID(); setOffer(blankOffer()); setApply(true); setError(''); }
+  async function submitOffer() {
+    if (!task) return;
+    await run(async () => {
+      const result = await api('propose', { requestId: offerRequestId.current, proposal: { ...offer, teamId: team, taskId: task.id } });
+      setProposals(values => [result.proposal, ...values.filter(p => p.id !== result.proposal.id)]);
+      setOffer(blankOffer()); setApply(false); setSelected(null); setProposalFilter('all'); setTab('offers'); toast.success('Предложение отправлено бизнесу');
+    });
+  }
+  async function confirmMilestone() {
+    await run(async () => {
+      const result = await api('milestone', { id: milestone, evidence });
+      setProposals(values => values.map(p => p.id === milestone ? result.proposal : p)); setMilestone(null); setEvidence(''); toast.success('Этап подтверждён. Команде начислено 20 баллов.');
+    });
+  }
+  const visible = tasks.filter(t => t.published && (topic === 'all' || t.topic === topic) && (ready === 'all' || level(t.score) === ready) && `${t.title} ${t.org} ${t.need} ${t.context}`.toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) => b.score - a.score || b.createdAt.localeCompare(a.createdAt));
+  const ownProposals = business ? proposals : proposals.filter(p => p.teamId === team);
+  const shownProposals = ownProposals.filter(p => proposalFilter === 'all' || offerStatus(p) === proposalFilter);
+  const published = tasks.filter(t => t.published);
+  const filtersActive = Boolean(query || topic !== 'all' || ready !== 'all');
+  const errorNotice = error ? <div className="error" role="alert"><span>{error}</span><Button variant="outline" size="sm" disabled={busy || loading} onClick={() => { setLoading(true); setError(''); void load(); }}><RotateCcw size={14} />Обновить данные</Button></div> : null;
+  const renderProposal = (p: Proposal) => <ProposalCard key={p.id} proposal={p} task={tasks.find(t => t.id === p.taskId)} business={business} busy={busy} onOpen={openTask} onDecide={(item, status) => void decide(item, status)} onMilestone={id => { setError(''); setMilestone(id); setEvidence(''); }} />;
+  useEffect(() => {
+    const context = (document as unknown as { modelContext?: { registerTool: (tool: unknown, options?: unknown) => unknown } }).modelContext;
+    if (!context?.registerTool) return;
+    const controller = new AbortController();
+    try { Promise.resolve(context.registerTool({ name: 'filter_task_catalog', title: 'Фильтровать каталог задач', description: 'Показывает опубликованные задачи по теме и уровню готовности. Не меняет данные.', inputSchema: { type: 'object', properties: { topic: { type: 'string', enum: ['all', ...topics] }, level: { type: 'string', enum: ['all', 'draft', 'working', 'ready', 'priority'] } }, additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: true }, execute: async (input: unknown) => {
+      const p = input as { topic?: string; level?: string };
+      if (!p || typeof p !== 'object' || (p.topic && !['all', ...topics].includes(p.topic)) || (p.level && !['all', 'draft', 'working', 'ready', 'priority'].includes(p.level))) throw Error('Неизвестный фильтр');
+      setTopic(p.topic || 'all'); setReady(p.level || 'all'); setQuery(''); setTab('catalog');
+      return { tasks: tasks.filter(t => t.published && (!p.topic || p.topic === 'all' || t.topic === p.topic) && (!p.level || p.level === 'all' || level(t.score) === p.level)).map(t => ({ title: t.title, score: t.score })) };
+    } }, { signal: controller.signal })).catch(() => {}); } catch { /* Optional browser integration. */ }
+    return () => controller.abort();
+  }, [tasks]);
+  return <div className="app">
+    <Toaster position="bottom-right" />
+    <a className="skip-link" href="#main-content">Перейти к содержимому</a>
+    <header className="topbar"><div className="topbar-inner">
+      <button className="brand" onClick={() => setTab('catalog')} disabled={busy} aria-label="AI Sana — каталог задач"><span className="brand-symbol" aria-hidden="true">S</span><span><strong>AI Sana</strong><small>Challenge Hub</small></span></button>
+      <div className="owner">МНВО<span>Практические задачи бизнеса</span></div>
+      <div className="role-control"><span className="demo-badge">Демо</span><Picker label="Роль в демонстрации" value={role} onChange={changeRole} disabled={busy} items={[{ value: 'business', label: 'Бизнес' }, { value: 'student', label: 'Студенческая команда' }]} />{!business && <Picker label="Команда" value={team} onChange={value => { setTeam(value); setProposalFilter('all'); }} disabled={busy} items={teams.map(t => ({ value: t.id, label: t.name }))} />}</div>
+    </div></header>
+    <div className="navigation"><Tabs value={tab} onValueChange={value => { setTab(value); setError(''); }}><TabsList variant="line" aria-label="Разделы приложения">
+      <TabsTrigger disabled={busy} value="catalog">Каталог задач</TabsTrigger>{business && <TabsTrigger disabled={busy} value="mine">Мои задачи</TabsTrigger>}
+      <TabsTrigger disabled={busy} value="offers">{business ? 'Отклики команд' : 'Мои отклики'}<span className="nav-count">{loading ? '—' : ownProposals.length}</span></TabsTrigger>
+      <TabsTrigger disabled={busy} value="guide">Как это работает</TabsTrigger>{tab === 'builder' && <TabsTrigger disabled={busy} value="builder">Конструктор</TabsTrigger>}
+    </TabsList></Tabs></div>
+    <main className="workspace" id="main-content" aria-busy={loading || busy}>
+      {!task && !milestone && errorNotice}
+      {business && dirty && tab !== 'builder' && <div className="draft-banner"><div><b>Есть незавершённая карточка</b><span>{draft.title || draft.draft.slice(0, 100) || 'Продолжите заполнение задачи'}</span></div><Button variant="outline" onClick={() => { setTab('builder'); setError(''); }}>Продолжить заполнение<ArrowRight size={15} /></Button></div>}
+      {tab === 'catalog' && <>
+        <div className="page-heading"><div><div className="section-label">РАБОЧЕЕ ПРОСТРАНСТВО</div><h1 id="page-title" tabIndex={-1}>Каталог задач</h1><p>Запросы бизнеса, открытые для предложений команд.</p></div>{business && <Button disabled={loading || busy || !cacheReady} onClick={startNew}><Plus size={17} />Создать задачу</Button>}</div>
+        <dl className="overview"><div><dt>Опубликовано</dt><dd>{loading ? '—' : published.length}<small>{plural(published.length, ['задача', 'задачи', 'задач'])}</small></dd></div><div><dt>Готовы к работе <span title="Готовность от 70 баллов">≥ 70</span></dt><dd>{loading ? '—' : published.filter(t => t.score >= 70).length}<small>{plural(published.filter(t => t.score >= 70).length, ['задача', 'задачи', 'задач'])}</small></dd></div><div><dt>{business ? 'На рассмотрении' : 'Ваши отклики'}</dt><dd>{loading ? '—' : business ? proposals.filter(p => p.status === 'pending').length : ownProposals.length}<small>{plural(business ? proposals.filter(p => p.status === 'pending').length : ownProposals.length, ['отклик', 'отклика', 'откликов'])}</small></dd></div><div><dt>Участвуют</dt><dd>{teams.length}<small>команд</small></dd></div></dl>
+        <section className="catalog-section" aria-label="Поиск и список задач">
+          <div className="toolbar"><div className="search-field"><Search size={17} aria-hidden="true" /><Input aria-label="Поиск задач" placeholder="Поиск по задачам и организациям" value={query} onChange={e => setQuery(e.target.value)} /></div><Picker label="Тема" value={topic} onChange={setTopic} items={[{ value: 'all', label: 'Все направления' }, ...topics.map(value => ({ value, label: value }))]} /><Picker label="Уровень готовности" value={ready} onChange={setReady} items={[{ value: 'all', label: 'Любая готовность' }, { value: 'priority', label: '90–100 · Приоритетная' }, { value: 'ready', label: '70–89 · Готовая' }, { value: 'working', label: '40–69 · Рабочая' }, { value: 'draft', label: '0–39 · Уточнить' }]} />{filtersActive && <Button variant="ghost" onClick={clearFilters}>Сбросить</Button>}</div>
+          <div className="list-caption"><span aria-live="polite">{loading ? 'Загружаем задачи…' : `Найдено: ${visible.length}`}</span><span><SlidersHorizontal size={14} aria-hidden="true" />По готовности: сначала выше</span></div>
+          {loading ? <div className="loading-list" aria-label="Загрузка задач">{[1, 2, 3].map(n => <Skeleton key={n} className="h-24 rounded-md" />)}</div> : visible.length ? <TaskList tasks={visible} proposals={proposals} onOpen={openTask} disabled={busy} /> : <div className="empty-state"><Search size={24} /><h2>{error ? 'Данные недоступны' : 'Нет задач по этим условиям'}</h2><p>{error ? 'Повторите загрузку с помощью кнопки выше.' : 'Измените запрос или сбросьте фильтры.'}</p>{filtersActive && <Button variant="outline" onClick={clearFilters}>Сбросить фильтры</Button>}</div>}
+        </section><p className="catalog-note"><CircleHelp size={15} aria-hidden="true" />Готовность показывает полноту описания. Отклик доступен при любом балле.</p>
+      </>}
+      {tab === 'mine' && <>
+        <div className="page-heading"><div><div className="section-label">БИЗНЕС</div><h1 id="page-title" tabIndex={-1}>Мои задачи</h1><p>Черновики и опубликованные запросы в вашем рабочем пространстве.</p></div><Button disabled={busy || loading} onClick={startNew}><Plus size={17} />Новая задача</Button></div>
+        <TaskList tasks={[...tasks].sort((a, b) => Number(a.published) - Number(b.published) || b.createdAt.localeCompare(a.createdAt))} proposals={proposals} onOpen={openTask} disabled={busy} />
+      </>}
+      {tab === 'builder' && business && <>
+        <div className="page-heading"><div><div className="section-label">{draft.id ? 'РЕДАКТИРОВАНИЕ ЗАДАЧИ' : 'НОВАЯ ЗАДАЧА'}</div><h1 id="page-title" tabIndex={-1}>{['Описание задачи', 'Уточнение деталей', 'Проверка и публикация'][step]}</h1><p>{['Опишите текущую проблему и желаемые изменения.', 'Ответьте на вопросы. Неизвестные сведения можно оставить пустыми.', 'Проверьте формулировки и подтвердите сведения перед публикацией.'][step]}</p></div><span className="save-status">{dirty ? cacheAvailable ? 'Ввод сохранён в этой вкладке' : 'Сохраните черновик перед выходом' : 'Изменений нет'}</span></div>
+        <nav className="steps" aria-label="Шаги подготовки задачи">{['Описание', 'Уточнение', 'Карточка'].map((label, index) => <button key={label} disabled={busy || index > maxStep} aria-current={step === index ? 'step' : undefined} onClick={() => setStep(index)}><span>{index + 1}</span>{label}{index < maxStep && <Check size={14} />}</button>)}</nav>
+        <div className="builder"><section className="surface editor-surface"><fieldset disabled={busy || loading}>
+          {step === 0 ? <>
+            <div className="field"><label htmlFor="draft">Описание потребности</label><Textarea id="draft" rows={6} placeholder="Например: заявки приходят по почте и в мессенджерах. Менеджеры теряют обращения при передаче между отделами." value={draft.draft} maxLength={3000} onChange={e => editField('draft', e.target.value)} /><div className="field-meta"><span>Начните с процесса, проблемы и ожидаемого результата.</span><span>{draft.draft.length}/3000</span></div></div>
+            <div className="field"><label>Направление</label><Picker label="Тема новой задачи" value={draft.topic} onChange={value => editField('topic', value)} items={topics.map(value => ({ value, label: value }))} disabled={busy} /></div>
+            {!draft.id && <div className="examples"><span>Учебные примеры</span><div>{seedDrafts.map(example => <button key={example.topic} disabled={busy} onClick={() => guardEditor(() => { setDraft({ ...blankTask(), draft: example.text, topic: example.topic }); setDirty(true); setConfirmed(false); setQuestions([]); setAIResult(null); setMaxStep(0); })}>{example.topic}</button>)}</div></div>}
+            <p className="ai-status">{aiNotice(ai, null)}</p>
+            <div className="actions">{!draft.published && <Button variant="outline" disabled={busy || draft.draft.trim().length < 10} onClick={() => void save(false)}>Сохранить черновик</Button>}<Button disabled={busy || draft.draft.trim().length < 10 || !ai} onClick={() => void ask()}>{busy ? <Loader2 className="animate-spin" size={16} /> : null}Уточнить задачу<ArrowRight size={16} /></Button></div>
+          </> : step === 1 ? <>
+            <div className="ai-status" role="status">{aiResult ? aiNotice(ai, aiResult) : 'Сохранённые вопросы для проверки карточки. Повторный запрос к модели не выполнялся.'}</div>
+            {questions.map((question, index) => <div className="field question-field" key={question.key}><label htmlFor={'q-' + question.key}><span className="question-number">{String(index + 1).padStart(2, '0')}</span>{question.text}</label><Textarea id={'q-' + question.key} value={draft[question.key]} maxLength={3000} placeholder="Ваш ответ" onChange={e => editField(question.key, e.target.value)} /></div>)}
+            <div className="actions split"><Button variant="ghost" onClick={() => setStep(0)}><ArrowLeft size={16} />Назад</Button><div>{!draft.published && <Button variant="outline" onClick={() => void save(false)}>Сохранить черновик</Button>}<Button onClick={() => { setDraft(value => ({ ...value, title: value.title || value.draft.slice(0, 80) })); setDirty(true); setStep(2); setMaxStep(2); setConfirmed(false); }}>Собрать карточку<ArrowRight size={16} /></Button></div></div>
+          </> : <>
+            <div className="two-cols"><div className="field"><label htmlFor="title">Название <span className="required">*</span></label><Input id="title" value={draft.title} maxLength={160} aria-invalid={draft.title.trim().length < 3} onChange={e => editField('title', e.target.value)} /><p className="help">Кратко: какой результат нужен бизнесу.</p></div><div className="field"><label htmlFor="org">Организация <span className="required">*</span></label><Input id="org" value={draft.org} maxLength={100} placeholder="Название организации" aria-invalid={draft.org.trim().length < 2} onChange={e => editField('org', e.target.value)} /></div></div>
+            <div className="field"><label>Направление</label><Picker label="Тема карточки" value={draft.topic} onChange={value => editField('topic', value)} items={topics.map(value => ({ value, label: value }))} disabled={busy} /></div>
+            {fieldDefs.map(field => <div className="field" key={field.key}><label htmlFor={field.key}>{field.label}<span className="field-weight">{field.points} баллов</span></label><Textarea id={field.key} value={draft[field.key]} maxLength={3000} placeholder={field.question} onChange={e => editField(field.key, e.target.value)} />{!isFilled(draft[field.key]) && <p className="help">Открытый вопрос — не учитывается в рейтинге.</p>}</div>)}
+            <div className="confirmation"><label className="field-check"><Checkbox checked={confirmed} onCheckedChange={value => setConfirmed(value === true)} /><span>Я проверил(а) заполненные сведения и подтверждаю их достоверность. Незаполненные поля останутся открытыми вопросами.</span></label></div>
+            <p className="help">{draft.org.trim().length < 2 || draft.title.trim().length < 3 ? 'Для публикации укажите название и организацию.' : !confirmed ? 'Для публикации подтвердите сведения выше.' : 'Карточка готова к публикации.'}</p>
+            <div className="actions"><Button variant="ghost" onClick={() => void ask()} disabled={busy || draft.draft.trim().length < 10}>Уточнить ещё</Button>{!draft.published && <Button variant="outline" onClick={() => void save(false)}>Сохранить черновик</Button>}<Button disabled={busy || !confirmed || draft.title.trim().length < 3 || draft.org.trim().length < 2} onClick={() => void save(true)}>{busy ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}{draft.published ? 'Подтвердить изменения' : 'Опубликовать задачу'}</Button></div>
+          </>}
+        </fieldset></section><Rating task={draft} /></div>
+      </>}
+      {tab === 'offers' && <>
+        <div className="page-heading"><div><div className="section-label">СОТРУДНИЧЕСТВО</div><h1 id="page-title" tabIndex={-1}>{business ? 'Отклики команд' : 'Мои отклики'}</h1><p>{business ? 'Сравните подходы и выберите исполнителей. Решение принимаете вы.' : 'Предложения, решения бизнеса и подтверждённые результаты.'}</p></div></div>
+        {!business && <div className="team-summary"><span className="profile-badge">{activeTeam.initials}</span><div><h2>{activeTeam.name}</h2><p>{activeTeam.skills}</p><p className="help">Интересы: {activeTeam.interests}</p></div><div className="team-points"><strong>{proposals.filter(p => p.teamId === team && p.milestone).length * 20}</strong><span>баллов за результат</span></div></div>}
+        <div className="status-filters" aria-label="Статус откликов">{proposalFilters.map(filter => <button key={filter.value} aria-pressed={proposalFilter === filter.value} onClick={() => setProposalFilter(filter.value)}>{filter.label}<span>{filter.value === 'all' ? ownProposals.length : ownProposals.filter(p => offerStatus(p) === filter.value).length}</span></button>)}</div>
+        {shownProposals.length ? <div className="proposals-list">{shownProposals.map(renderProposal)}</div> : <div className="empty-state"><FileText size={26} /><h2>Нет откликов в этом разделе</h2><p>{proposalFilter !== 'all' ? 'Выберите другой статус или покажите все отклики.' : business ? 'После публикации задачи команды смогут предложить решение.' : 'Выберите задачу в каталоге и предложите свой подход.'}</p><Button variant="outline" onClick={() => proposalFilter !== 'all' ? setProposalFilter('all') : setTab('catalog')}>{proposalFilter !== 'all' ? 'Все отклики' : 'В каталог'}</Button></div>}
+      </>}
+      {tab === 'guide' && <section className="surface reading"><div className="section-label">СПРАВКА</div><h1 id="page-title" tabIndex={-1}>Как работать с платформой</h1><h2>Бизнес: от запроса до исполнителя</h2><ol><li>Создайте задачу и опишите проблему. Помощник задаст уточняющие вопросы.</li><li>Заполните карточку. Можно оставить неизвестные сведения открытыми.</li><li>Проверьте данные, подтвердите их и опубликуйте задачу.</li><li>Сравните отклики. Выберите одну, несколько команд или оставьте запрос без исполнителя.</li><li>После фактической проверки результата подтвердите этап. Команда получит 20 баллов.</li></ol><h2>Команда: от задачи до результата</h2><p>Откройте любую опубликованную задачу. Отправьте идею, план, срок и ссылку на прототип. Все предложения доступны бизнесу, автоматического назначения нет. Низкий рейтинг задачи не запрещает отклик.</p><h2>Что означает готовность</h2><p>Рейтинг оценивает полноту подтверждённого описания. Он не доказывает качество идеи или достоверность данных. Поле засчитывается при ответе от 8 символов; «не знаю» и другие простые заглушки не засчитываются.</p><div className="rating-table">{fieldDefs.map(field => <div key={field.key}><span>{field.label}</span><b>{field.points}</b></div>)}</div><h2>Учебная версия</h2><p>Вверху можно переключать роли и команды. Организации, контакты и примеры вымышленные. Данные хранятся в рабочем пространстве текущего браузера; другой браузер получает отдельный набор. Ссылки example.com служат примерами и не ведут к рабочим прототипам.</p><p>Незавершённая карточка сохраняется в текущей вкладке и восстанавливается после обновления страницы. Для постоянного хранения нажмите «Сохранить черновик». Перед публикацией подтверждение всегда требуется заново.</p><h2>Помощник и данные</h2><p>{aiNotice(ai, null)} Помощник предлагает вопросы, а формулировки карточки и решение о выборе команды остаются за человеком. При сбое используются резервные вопросы с явным уведомлением.</p></section>}
+      <footer className="footer-note"><span>AI Sana Challenge Hub <span className="footer-divider">/</span> МНВО</span><span>Учебная среда · {ai?.enabled && ai.keyConfigured ? 'OpenAI подключён' : 'Помощник в демо-режиме'}</span></footer>
+    </main>
+    <Sheet open={!!task} onOpenChange={open => { if (!open) closeTask(); }}><SheetContent className="task-sheet" onEscapeKeyDown={event => { if (busy) event.preventDefault(); }} onPointerDownOutside={event => { if (busy) event.preventDefault(); }}>
+      <SheetHeader className="task-sheet-header"><div className="section-label">{apply ? 'ОТКЛИК НА ЗАДАЧУ' : 'КАРТОЧКА ЗАДАЧИ'}</div><SheetTitle>{task?.title}</SheetTitle><SheetDescription>{task?.org || 'Организация не указана'} · {task?.topic}</SheetDescription></SheetHeader>
+      {task && <div className="sheet-body">{errorNotice}
+        {!apply ? <>
+          <div className="detail-status"><span className={'readiness ' + (task.published ? level(task.score) : 'unpublished')}>{task.published ? readiness(task.score) : 'Черновик'} · {task.score}/100</span><span className="subtle">{task.published ? 'Опубликована' : 'Доступна только бизнесу'}</span></div>
+          <div className="detail-action">{business ? <Button variant="outline" disabled={busy} onClick={() => editTask(task)}>Редактировать карточку</Button> : task.published && <Button disabled={busy} onClick={startOffer}>Предложить решение<ArrowRight size={16} /></Button>}</div>
+          {fieldDefs.map(field => <div className="detail-block" key={field.key}><h3>{field.label}<span>{task.confirmed && isFilled(task[field.key]) ? field.points : 0}/{field.points}</span></h3><p className={!isFilled(task[field.key]) ? 'missing-field' : ''}>{task[field.key] || 'Нужно уточнить у бизнеса'}</p></div>)}
+          {business ? <div className="task-proposals"><h2>Предложения команд</h2>{proposals.filter(p => p.taskId === task.id).length ? proposals.filter(p => p.taskId === task.id).map(renderProposal) : <p className="help">Пока нет предложений. Команды смогут откликнуться после публикации.</p>}</div> : task.published && <div className="detail-action bottom"><p className="help">Отклик открыт при любом рейтинге задачи.</p><Button disabled={busy} onClick={startOffer}>Предложить решение<ArrowRight size={16} /></Button></div>}
+        </> : <form onSubmit={event => { event.preventDefault(); void submitOffer(); }}><fieldset disabled={busy || loading}><div className="offer-team"><span className="profile-badge">{activeTeam.initials}</span><div><b>{activeTeam.name}</b><p className="subtle">{activeTeam.skills}</p></div></div>
+          {([{ key: 'idea', label: 'Идея решения', placeholder: 'Предлагаемый подход и его польза для бизнеса' }, { key: 'plan', label: 'План работы', placeholder: 'Основные этапы и что вы покажете на каждом' }] as const).map(field => <div className="field" key={field.key}><label htmlFor={'offer-' + field.key}>{field.label} *</label><Textarea id={'offer-' + field.key} required minLength={8} maxLength={3000} placeholder={field.placeholder} value={offer[field.key]} onChange={e => setOffer(value => ({ ...value, [field.key]: e.target.value }))} /></div>)}
+          <p className="help mb-5">{cacheAvailable ? "Ввод сохраняется в этой вкладке до отправки." : "Хранилище вкладки недоступно. Не обновляйте страницу до отправки."}</p><div className="field"><label htmlFor="term">Срок *</label><Input id="term" required minLength={2} maxLength={100} value={offer.term} placeholder="Например, 2 недели" onChange={e => setOffer(value => ({ ...value, term: e.target.value }))} /></div>
+          <div className="field"><label htmlFor="prototype">Ссылка на прототип *</label><Input type="url" id="prototype" required maxLength={500} value={offer.link} placeholder="https://…" onChange={e => setOffer(value => ({ ...value, link: e.target.value }))} /><p className="help">Ссылка на демонстрацию, макет или репозиторий.</p></div>
+          <div className="actions"><Button type="button" variant="outline" onClick={closeTask}>Закрыть</Button><Button disabled={busy} type="submit">{busy ? 'Отправка…' : 'Отправить предложение'}<ArrowRight size={16} /></Button></div>
+        </fieldset></form>}
+      </div>}
+    </SheetContent></Sheet>
+    <Dialog open={!!milestone} onOpenChange={open => { if (!open && !busy) { setMilestone(null); setError(''); } }}><DialogContent><DialogHeader><DialogTitle>Подтвердить фактический результат</DialogTitle><DialogDescription>Опишите выполненный этап и результат проверки. Команда получит 20 баллов один раз за этот отклик.</DialogDescription></DialogHeader>{errorNotice}<label htmlFor="evidence" className="field-label">Результат и подтверждение</label><Textarea id="evidence" disabled={busy} value={evidence} maxLength={1500} placeholder="Что проверено и с каким результатом?" onChange={e => setEvidence(e.target.value)} /><Button disabled={busy || !isFilled(evidence)} onClick={() => void confirmMilestone()}>{busy ? 'Сохраняем…' : 'Подтвердить и начислить баллы'}</Button></DialogContent></Dialog>
+    <Dialog open={!!pendingAction} onOpenChange={open => { if (!open) setPendingAction(null); }}><DialogContent onOpenAutoFocus={event => { event.preventDefault(); document.getElementById("keep-editing")?.focus(); }}><DialogHeader><DialogTitle>Есть несохранённые изменения</DialogTitle><DialogDescription>{pendingAction?.message}</DialogDescription></DialogHeader><div className="actions"><Button variant="outline" onClick={() => { const action = pendingAction?.action; setPendingAction(null); action?.(); }}>Продолжить без сохранения</Button><Button id="keep-editing" onClick={() => setPendingAction(null)}>Остаться</Button></div></DialogContent></Dialog>
+  </div>;
 }
-
-

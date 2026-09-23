@@ -6,6 +6,13 @@ const [command, ...args] = process.argv.slice(2);
 if (!["dev", "build"].includes(command)) throw new Error("Expected dev or build.");
 const managedLinux = readExecutionProfile() === "managed-linux";
 
+// Builds must never copy local API secrets into generated Worker artifacts.
+// Development still loads the ignored .env.local through Wrangler/Vinext.
+if (command === "build") {
+  process.env.CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV = "false";
+  process.env.CLOUDFLARE_INCLUDE_PROCESS_ENV = "false";
+}
+
 if (managedLinux && command === "build") {
   const result = spawnSync("bash", [
     fileURLToPath(new URL("./build-verified.sh", import.meta.url)), ...args,

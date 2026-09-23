@@ -12,7 +12,7 @@ export const fieldDefs=[
 ] as const;
 export type FieldKey=typeof fieldDefs[number]['key'];
 export type Fields=Record<FieldKey,string>;
-export type Task=Fields & {id:string;title:string;org:string;topic:string;draft:string;confirmed:boolean;published:boolean;score:number;createdAt:string};
+export type Task=Fields & {id:string;title:string;org:string;topic:string;draft:string;confirmed:boolean;published:boolean;score:number;createdAt:string;revision?:number};
 export type Proposal={id:string;taskId:string;teamId:string;idea:string;plan:string;term:string;link:string;status:'pending'|'chosen'|'rejected';evidence:string;milestone:boolean};
 export const teams=[
  {id:'t1',name:'Qadam',interests:'Аналитика, сервис',skills:'Python · React · SQL',initials:'Q'},
