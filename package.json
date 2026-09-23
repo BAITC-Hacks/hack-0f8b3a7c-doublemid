@@ -11,7 +11,11 @@
     "build": "node scripts/run-framework.mjs build",
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply DB --local --config wrangler.local.jsonc",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test-domain.mjs && node --experimental-specifier-resolution=node scripts/test-reliability.mjs && node scripts/test-openai.mjs",
+    "test:built": "node scripts/test-built.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

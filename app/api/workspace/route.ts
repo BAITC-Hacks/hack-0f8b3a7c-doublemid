@@ -1,3 +1,5 @@
+import { currentAccount } from '@/lib/auth';
+import type { Account } from '@/lib/auth-types';
 import { database } from '@/db/store';
 import { getAIConfig } from '@/lib/ai-config';
 import { aiStatus, generateQuestions } from '@/lib/openai-questions';
@@ -8,48 +10,49 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const str = (value: unknown, max = 3000) => typeof value === 'string' ? value.trim().slice(0, max) : '';
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const fail = (message: string, status = 400) => Response.json({ error: message }, { status, headers: { 'Cache-Control': 'no-store' } });
-function sessionOf(request: Request) {
-  const value = request.headers.get('cookie')?.match(/(?:^|;\s*)sana_session=([^;]+)(?:;|$)/)?.[1];
-  return value && uuid.test(value) ? value : undefined;
-}
-function response(data: unknown, session?: string, request?: Request) {
-  return Response.json(data, { headers: { 'Cache-Control': 'no-store', ...(session ? {
-    'Set-Cookie': `sana_session=${session}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${request?.url.startsWith('https:') ? '; Secure' : ''}`,
-  } : {}) } });
-}
-async function snapshot(session: string) {
+const SHARED = 'sana-shared-v2';
+function response(data: unknown) { return Response.json(data, { headers: { 'Cache-Control': 'no-store' } }); }
+async function snapshot(session: string, account: Account) {
   const db = database();
   const [tasks, proposals] = await Promise.all([
     db.prepare('SELECT payload FROM tasks WHERE session = ?').bind(session).all<{ payload: string }>(),
     db.prepare('SELECT payload FROM proposals WHERE session = ?').bind(session).all<{ payload: string }>(),
   ]);
-  return { tasks: tasks.results.map(x => JSON.parse(x.payload)), proposals: proposals.results.map(x => JSON.parse(x.payload)) };
+  const allProposals: Proposal[] = proposals.results.map(x => JSON.parse(x.payload));
+  const allTasks: Task[] = tasks.results.map(x => JSON.parse(x.payload));
+  return { tasks: allTasks.filter(t => account.role === 'business' || t.published).map(t => ({ ...t, proposalCount: allProposals.filter(p => p.taskId === t.id).length })), proposals: allProposals.filter(p => account.role === 'business' || p.teamId === account.teamId), leaderboard: teams.map(team => ({ ...team, points: allProposals.filter(p => p.teamId === team.id && p.milestone).length * 20 })).sort((a,b) => b.points - a.points) };
 }
 export async function GET(request: Request) {
   try {
-    let session = sessionOf(request);
+    const account = await currentAccount(request);
+    if (!account) return fail('Войдите в аккаунт.', 401);
+    const session = SHARED;
     const db = database();
     const active = session ? await db.prepare('SELECT id FROM tasks WHERE session = ? LIMIT 1').bind(session).first() : null;
     if (!active) {
-      session = crypto.randomUUID();
+      
       await db.batch([
-        ...seedTasks.map(t => db.prepare('INSERT INTO tasks (id, session, payload) VALUES (?, ?, ?)').bind(`${session}-${t.id}`, session, JSON.stringify({ ...t, id: `${session}-${t.id}` }))),
-        ...seedProposals.map(p => db.prepare('INSERT INTO proposals (id, session, task_id, payload) VALUES (?, ?, ?, ?)').bind(`${session}-${p.id}`, session, `${session}-${p.taskId}`, JSON.stringify({ ...p, id: `${session}-${p.id}`, taskId: `${session}-${p.taskId}` }))),
+        ...seedTasks.map(t => db.prepare('INSERT OR IGNORE INTO tasks (id, session, payload) VALUES (?, ?, ?)').bind(`${session}-${t.id}`, session, JSON.stringify({ ...t, id: `${session}-${t.id}` }))),
+        ...seedProposals.map(p => db.prepare('INSERT OR IGNORE INTO proposals (id, session, task_id, payload) VALUES (?, ?, ?, ?)').bind(`${session}-${p.id}`, session, `${session}-${p.taskId}`, JSON.stringify({ ...p, id: `${session}-${p.id}`, taskId: `${session}-${p.taskId}` }))),
       ]);
     }
-    return response({ ...await snapshot(session!), ai: aiStatus(getAIConfig()) }, session, request);
+    return response({ ...await snapshot(session, account), account, ai: aiStatus(getAIConfig()) });
   } catch { return fail('Не удалось загрузить рабочее пространство. Попробуйте ещё раз.', 503); }
 }
-// A best-effort demo guard; production requires durable quotas and authentication.
+// AI call throttle; role authorization is enforced for every mutation.
 const questionRequests = new Map<string, number>();
 export async function POST(request: Request) {
   try {
     const origin = request.headers.get('origin');
     if (origin && origin !== new URL(request.url).origin) return fail('Недопустимый источник запроса.', 403);
-    const session = sessionOf(request);
-    if (!session) return fail('Сессия не найдена. Обновите страницу.', 401);
+    const account = await currentAccount(request);
+    if (!account) return fail('Войдите в аккаунт.', 401);
+    const session = SHARED;
     const body = await readRequestBody(request);
     const db = database();
+    const adminActions = ['questions', 'saveTask', 'decide', 'milestone'];
+    if (adminActions.includes(String(body.action)) && account.role !== 'business') return fail('Это действие доступно только бизнесу.', 403);
+    if (['propose', 'submitProgress'].includes(String(body.action)) && account.role !== 'student') return fail('Это действие доступно только студенческой команде.', 403);
     if (!await db.prepare('SELECT id FROM tasks WHERE session = ? LIMIT 1').bind(session).first()) return fail('Сессия не найдена. Обновите страницу.', 401);
     if (body.action === 'questions') {
       const input = object(body.task);
@@ -95,7 +98,7 @@ export async function POST(request: Request) {
       if (!row || !JSON.parse(row.payload).published) return fail('Задача недоступна.', 404);
       const requestId = str(body.requestId, 100);
       if (requestId && !uuid.test(requestId)) return fail('Некорректный идентификатор отправки.');
-      const proposal: Proposal = { id: requestId || crypto.randomUUID(), taskId: str(input.taskId, 100), teamId: str(input.teamId, 20), idea: str(input.idea), plan: str(input.plan), term: str(input.term, 100), link: str(input.link, 500), status: 'pending', evidence: '', milestone: false };
+      const proposal: Proposal = { id: requestId || crypto.randomUUID(), taskId: str(input.taskId, 100), teamId: account.teamId!, idea: str(input.idea), plan: str(input.plan), term: str(input.term, 100), link: str(input.link, 500), status: 'pending', evidence: '', milestone: false };
       if (!teams.some(t => t.id === proposal.teamId) || !isFilled(proposal.idea) || !isFilled(proposal.plan) || proposal.term.length < 2) return fail('Заполните идею, план и срок.');
       try { const link = new URL(proposal.link); if (!['http:', 'https:'].includes(link.protocol) || link.username || link.password) throw Error(); } catch { return fail('Добавьте корректную ссылку на прототип (http или https), без логина и пароля.'); }
       await db.prepare('INSERT INTO proposals (id, session, task_id, payload) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING').bind(proposal.id, session, proposal.taskId, JSON.stringify(proposal)).run();
@@ -105,20 +108,27 @@ export async function POST(request: Request) {
       if ((['taskId', 'teamId', 'idea', 'plan', 'term', 'link'] as const).some(key => existing[key] !== proposal[key])) return fail('Этот запрос уже использован. Откройте новую форму отклика.', 409);
       return response({ proposal: existing });
     }
-    if (body.action === 'decide' || body.action === 'milestone') {
+    if (body.action === 'decide' || body.action === 'milestone' || body.action === 'submitProgress') {
       const row = await db.prepare('SELECT payload FROM proposals WHERE id = ? AND session = ?').bind(str(body.id, 100), session).first<{ payload: string }>();
       if (!row) return fail('Отклик не найден.', 404);
       const proposal: Proposal = JSON.parse(row.payload);
-      if (body.action === 'decide') {
+      if (body.action === 'submitProgress') {
+        if (proposal.teamId !== account.teamId) return fail('Чужой отклик недоступен.', 403);
+        if (proposal.status !== 'chosen' || proposal.milestone) return fail('Результат можно отправить только по выбранному незавершённому отклику.');
+        const evidence = str(body.evidence, 1500);
+        if (!isFilled(evidence)) return fail('Опишите выполненную работу и приложите ссылку на результат.');
+        proposal.evidence = evidence; proposal.evidenceSubmittedAt = new Date().toISOString();
+      } else if (body.action === 'decide') {
         if (body.status !== 'chosen' && body.status !== 'rejected') return fail('Неизвестное решение.');
         if (proposal.milestone) return fail('Результат уже подтверждён.');
-        proposal.status = body.status;
+        proposal.status = body.status; proposal.decidedAt = new Date().toISOString();
       } else {
         if (proposal.status !== 'chosen') return fail('Сначала выберите команду.');
         if (proposal.milestone) return response({ proposal });
         const evidence = str(body.evidence, 1500);
         if (!isFilled(evidence)) return fail('Опишите проверенный результат этапа.');
-        proposal.evidence = evidence; proposal.milestone = true;
+        if (!proposal.evidenceSubmittedAt) return fail('Дождитесь отчёта команды о фактическом результате.');
+        proposal.evidence = evidence; proposal.milestone = true; proposal.confirmedAt = new Date().toISOString();
       }
       // An old decision cannot erase a concurrently confirmed milestone.
       const result = await db.prepare('UPDATE proposals SET payload = ? WHERE id = ? AND session = ? AND payload = ?').bind(JSON.stringify(proposal), proposal.id, session, row.payload).run();

@@ -1,4 +1,7 @@
 "use client";
+import { Login } from '@/components/hub/login';
+import { Dashboard, type Standing } from '@/components/hub/dashboard';
+import type { Account } from '@/lib/auth-types';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, FileText, Loader2, Plus, Search, SlidersHorizontal, CircleHelp, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -27,7 +30,10 @@ export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]), [proposals, setProposals] = useState<Proposal[]>([]);
   const [loading, setLoading] = useState(true), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const busyRef = useRef(false), offerRequestId = useRef('');
-  const [role, setRole] = useState('business'), [team, setTeam] = useState('t1'), [tab, setTab] = useState('catalog');
+  const [account, setAccount] = useState<Account | null>(null), [demo, setDemo] = useState(false);
+  const [standings, setStandings] = useState<Standing[]>([]), [tab, setTab] = useState('dashboard');
+  const [compare, setCompare] = useState(false);
+  const team = account?.teamId || 't1';
   const [query, setQuery] = useState(''), [topic, setTopic] = useState('all'), [ready, setReady] = useState('all'), [proposalFilter, setProposalFilter] = useState('all');
   const [draft, setDraft] = useState<Task>(blankTask), [step, setStep] = useState(0), [maxStep, setMaxStep] = useState(0);
   const [questions, setQuestions] = useState<AIQuestion[]>([]), [confirmed, setConfirmed] = useState(false), [dirty, setDirty] = useState(false);
@@ -36,14 +42,15 @@ export default function Home() {
   const [milestone, setMilestone] = useState<string | null>(null), [evidence, setEvidence] = useState('');
   const [pendingAction, setPendingAction] = useState<{ message: string; action: () => void } | null>(null);
   const task = tasks.find(t => t.id === selected), activeTeam = teams.find(t => t.id === team)!;
-  const business = role === 'business';
+  const business = account?.role === 'business';
 
   async function load() {
     try {
       const response = await fetch('/api/workspace', { signal: AbortSignal.timeout(15000) });
-      const data = await response.json() as { error?: string; tasks: Task[]; proposals: Proposal[]; ai: AIStatus };
+      const data = await response.json() as { error?: string; tasks: Task[]; proposals: Proposal[]; ai: AIStatus; account: Account; leaderboard: Standing[] };
+      if (response.status === 401) { setAccount(null); setTasks([]); setProposals([]); return; }
       if (!response.ok) throw Error(data.error || 'Не удалось загрузить данные.');
-      setTasks(data.tasks); setProposals(data.proposals); setAI(data.ai);
+      setTasks(data.tasks); setProposals(data.proposals); setAI(data.ai); setAccount(data.account); setStandings(data.leaderboard);
       return data;
     } catch (e) { setError(e instanceof Error && !['TypeError', 'TimeoutError'].includes(e.name) ? e.message : 'Нет связи с сервером. Повторите загрузку.'); }
     finally { setLoading(false); }
@@ -51,14 +58,21 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     async function initialize() {
-      const workspace = await load();
+      let workspace;
+      try {
+        const res = await fetch('/api/auth', { signal: AbortSignal.timeout(15000) });
+        const auth = await res.json() as { account: Account | null; demo: boolean; error?: string };
+        if (!res.ok) throw Error(auth.error);
+        setDemo(auth.demo);
+        if (auth.account) workspace = await load(); else setLoading(false);
+      } catch { setError('Не удалось загрузить аккаунт. Проверьте запуск сервера и миграции базы.'); setLoading(false); }
       if (cancelled) return;
       try {
         const saved = restoreEditor(sessionStorage.getItem(EDITOR_CACHE_KEY));
-        if (saved) { setDraft(saved.task); setQuestions(saved.questions); setStep(saved.step); setMaxStep(saved.maxStep); setDirty(true); }
+        if (saved && workspace?.account.role === 'business') { setDraft(saved.task); setQuestions(saved.questions); setStep(saved.step); setMaxStep(saved.maxStep); setDirty(true); }
         const savedOffer = restoreOffer(sessionStorage.getItem(OFFER_CACHE_KEY));
-        if (savedOffer && (!workspace || workspace.tasks.some(t => t.id === savedOffer.taskId && t.published))) {
-          setOffer(savedOffer.offer); setTeam(savedOffer.teamId); setRole('student');
+        if (savedOffer && workspace?.account.role === 'student' && workspace.account.teamId === savedOffer.teamId && workspace.tasks.some(t => t.id === savedOffer.taskId && t.published)) {
+          setOffer(savedOffer.offer);
           offerRequestId.current = savedOffer.requestId; setSelected(savedOffer.taskId); setApply(true);
         }
       } catch { setCacheAvailable(false); }
@@ -128,7 +142,14 @@ export default function Home() {
     if (apply && Object.values(offer).some(v => v.trim())) setPendingAction({ message: 'Отклик ещё не отправлен. Вернитесь к форме, чтобы закончить его, или закройте без сохранения.', action: () => { setSelected(null); setApply(false); setOffer(blankOffer()); } });
     else { setSelected(null); setApply(false); setError(''); }
   }
-  function changeRole(value: string) { setRole(value); setTab('catalog'); setSelected(null); setProposalFilter('all'); setError(''); }
+  async function logout() {
+    await run(async () => {
+      const res = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) });
+      if (!res.ok) throw Error('Не удалось выйти. Повторите попытку.');
+      setAccount(null); setTasks([]); setProposals([]); setStandings([]); setDraft(blankTask()); setDirty(false); setSelected(null); setApply(false); setOffer(blankOffer()); setTab('dashboard'); setProposalFilter('all'); setConfirmed(false); clearFilters();
+      try { sessionStorage.removeItem(EDITOR_CACHE_KEY); sessionStorage.removeItem(OFFER_CACHE_KEY); } catch {}
+    });
+  }
   function clearFilters() { setQuery(''); setTopic('all'); setReady('all'); }
   async function ask() {
     await run(async () => {
@@ -166,8 +187,8 @@ export default function Home() {
   }
   async function confirmMilestone() {
     await run(async () => {
-      const result = await api('milestone', { id: milestone, evidence });
-      setProposals(values => values.map(p => p.id === milestone ? result.proposal : p)); setMilestone(null); setEvidence(''); toast.success('Этап подтверждён. Команде начислено 20 баллов.');
+      const result = await api(business ? 'milestone' : 'submitProgress', { id: milestone, evidence });
+      setProposals(values => values.map(p => p.id === milestone ? result.proposal : p)); setMilestone(null); setEvidence(''); toast.success(business ? 'Этап подтверждён. Команде начислено 20 баллов.' : 'Результат отправлен бизнесу на проверку.'); void load();
     });
   }
   const visible = tasks.filter(t => t.published && (topic === 'all' || t.topic === topic) && (ready === 'all' || level(t.score) === ready) && `${t.title} ${t.org} ${t.need} ${t.context}`.toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) => b.score - a.score || b.createdAt.localeCompare(a.createdAt));
@@ -176,7 +197,7 @@ export default function Home() {
   const published = tasks.filter(t => t.published);
   const filtersActive = Boolean(query || topic !== 'all' || ready !== 'all');
   const errorNotice = error ? <div className="error" role="alert"><span>{error}</span><Button variant="outline" size="sm" disabled={busy || loading} onClick={() => { setLoading(true); setError(''); void load(); }}><RotateCcw size={14} />Обновить данные</Button></div> : null;
-  const renderProposal = (p: Proposal) => <ProposalCard key={p.id} proposal={p} task={tasks.find(t => t.id === p.taskId)} business={business} busy={busy} onOpen={openTask} onDecide={(item, status) => void decide(item, status)} onMilestone={id => { setError(''); setMilestone(id); setEvidence(''); }} />;
+  const renderProposal = (p: Proposal) => <ProposalCard key={p.id} proposal={p} task={tasks.find(t => t.id === p.taskId)} business={business} busy={busy} onOpen={openTask} onDecide={(item, status) => void decide(item, status)} onMilestone={id => { setError(''); setMilestone(id); setEvidence(proposals.find(p => p.id === id)?.evidence || ''); }} />;
   useEffect(() => {
     const context = (document as unknown as { modelContext?: { registerTool: (tool: unknown, options?: unknown) => unknown } }).modelContext;
     if (!context?.registerTool) return;
@@ -189,22 +210,32 @@ export default function Home() {
     } }, { signal: controller.signal })).catch(() => {}); } catch { /* Optional browser integration. */ }
     return () => controller.abort();
   }, [tasks]);
+  useEffect(() => {
+    if (!account?.id) return;
+    const refresh = () => { if (!busyRef.current && document.visibilityState === 'visible') void load(); };
+    const timer = setInterval(refresh, 15000);
+    window.addEventListener('focus', refresh);
+    return () => { clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, [account?.id]);
+  if (loading && !account) return <div className="auth-loading"><span className="brand-symbol">S</span><p>Открываем AI Sana…</p></div>;
+  if (!account) return <>{error && <div role="alert" className="auth-error">{error} <button onClick={() => window.location.reload()}>Повторить</button></div>}<Login demo={demo} onLogin={async () => { setError(''); await load(); setTab('dashboard'); }} /></>;
   return <div className="app">
     <Toaster position="bottom-right" />
     <a className="skip-link" href="#main-content">Перейти к содержимому</a>
     <header className="topbar"><div className="topbar-inner">
       <button className="brand" onClick={() => setTab('catalog')} disabled={busy} aria-label="AI Sana — каталог задач"><span className="brand-symbol" aria-hidden="true">S</span><span><strong>AI Sana</strong><small>Challenge Hub</small></span></button>
       <div className="owner">МНВО<span>Практические задачи бизнеса</span></div>
-      <div className="role-control"><span className="demo-badge">Демо</span><Picker label="Роль в демонстрации" value={role} onChange={changeRole} disabled={busy} items={[{ value: 'business', label: 'Бизнес' }, { value: 'student', label: 'Студенческая команда' }]} />{!business && <Picker label="Команда" value={team} onChange={value => { setTeam(value); setProposalFilter('all'); }} disabled={busy} items={teams.map(t => ({ value: t.id, label: t.name }))} />}</div>
+      <div className="role-control"><span className="account-role">{business ? 'Бизнес / администратор' : 'Студенческая команда'}</span><span className="account-name">{account.name}</span><Button variant="outline" size="sm" disabled={busy} onClick={() => { if (dirty || (apply && Object.values(offer).some(Boolean))) setPendingAction({ message: 'Сохраните черновик перед выходом или продолжите без сохранения.', action: () => void logout() }); else void logout(); }}>Выйти</Button></div>
     </div></header>
     <div className="navigation"><Tabs value={tab} onValueChange={value => { setTab(value); setError(''); }}><TabsList variant="line" aria-label="Разделы приложения">
-      <TabsTrigger disabled={busy} value="catalog">Каталог задач</TabsTrigger>{business && <TabsTrigger disabled={busy} value="mine">Мои задачи</TabsTrigger>}
+      <TabsTrigger disabled={busy} value="dashboard">Обзор</TabsTrigger><TabsTrigger disabled={busy} value="catalog">Каталог задач</TabsTrigger>{business && <TabsTrigger disabled={busy} value="mine">Мои задачи</TabsTrigger>}
       <TabsTrigger disabled={busy} value="offers">{business ? 'Отклики команд' : 'Мои отклики'}<span className="nav-count">{loading ? '—' : ownProposals.length}</span></TabsTrigger>
       <TabsTrigger disabled={busy} value="guide">Как это работает</TabsTrigger>{tab === 'builder' && <TabsTrigger disabled={busy} value="builder">Конструктор</TabsTrigger>}
     </TabsList></Tabs></div>
     <main className="workspace" id="main-content" aria-busy={loading || busy}>
       {!task && !milestone && errorNotice}
       {business && dirty && tab !== 'builder' && <div className="draft-banner"><div><b>Есть незавершённая карточка</b><span>{draft.title || draft.draft.slice(0, 100) || 'Продолжите заполнение задачи'}</span></div><Button variant="outline" onClick={() => { setTab('builder'); setError(''); }}>Продолжить заполнение<ArrowRight size={15} /></Button></div>}
+      {tab === 'dashboard' && <Dashboard account={account} tasks={tasks} proposals={proposals} standings={standings} onNavigate={setTab} onCreate={startNew} onOpen={openTask} busy={busy || loading} />}
       {tab === 'catalog' && <>
         <div className="page-heading"><div><div className="section-label">РАБОЧЕЕ ПРОСТРАНСТВО</div><h1 id="page-title" tabIndex={-1}>Каталог задач</h1><p>Запросы бизнеса, открытые для предложений команд.</p></div>{business && <Button disabled={loading || busy || !cacheReady} onClick={startNew}><Plus size={17} />Создать задачу</Button>}</div>
         <dl className="overview"><div><dt>Опубликовано</dt><dd>{loading ? '—' : published.length}<small>{plural(published.length, ['задача', 'задачи', 'задач'])}</small></dd></div><div><dt>Готовы к работе <span title="Готовность от 70 баллов">≥ 70</span></dt><dd>{loading ? '—' : published.filter(t => t.score >= 70).length}<small>{plural(published.filter(t => t.score >= 70).length, ['задача', 'задачи', 'задач'])}</small></dd></div><div><dt>{business ? 'На рассмотрении' : 'Ваши отклики'}</dt><dd>{loading ? '—' : business ? proposals.filter(p => p.status === 'pending').length : ownProposals.length}<small>{plural(business ? proposals.filter(p => p.status === 'pending').length : ownProposals.length, ['отклик', 'отклика', 'откликов'])}</small></dd></div><div><dt>Участвуют</dt><dd>{teams.length}<small>команд</small></dd></div></dl>
@@ -214,7 +245,7 @@ export default function Home() {
           {loading ? <div className="loading-list" aria-label="Загрузка задач">{[1, 2, 3].map(n => <Skeleton key={n} className="h-24 rounded-md" />)}</div> : visible.length ? <TaskList tasks={visible} proposals={proposals} onOpen={openTask} disabled={busy} /> : <div className="empty-state"><Search size={24} /><h2>{error ? 'Данные недоступны' : 'Нет задач по этим условиям'}</h2><p>{error ? 'Повторите загрузку с помощью кнопки выше.' : 'Измените запрос или сбросьте фильтры.'}</p>{filtersActive && <Button variant="outline" onClick={clearFilters}>Сбросить фильтры</Button>}</div>}
         </section><p className="catalog-note"><CircleHelp size={15} aria-hidden="true" />Готовность показывает полноту описания. Отклик доступен при любом балле.</p>
       </>}
-      {tab === 'mine' && <>
+      {tab === 'mine' && business && <>
         <div className="page-heading"><div><div className="section-label">БИЗНЕС</div><h1 id="page-title" tabIndex={-1}>Мои задачи</h1><p>Черновики и опубликованные запросы в вашем рабочем пространстве.</p></div><Button disabled={busy || loading} onClick={startNew}><Plus size={17} />Новая задача</Button></div>
         <TaskList tasks={[...tasks].sort((a, b) => Number(a.published) - Number(b.published) || b.createdAt.localeCompare(a.createdAt))} proposals={proposals} onOpen={openTask} disabled={busy} />
       </>}
@@ -246,9 +277,10 @@ export default function Home() {
         <div className="page-heading"><div><div className="section-label">СОТРУДНИЧЕСТВО</div><h1 id="page-title" tabIndex={-1}>{business ? 'Отклики команд' : 'Мои отклики'}</h1><p>{business ? 'Сравните подходы и выберите исполнителей. Решение принимаете вы.' : 'Предложения, решения бизнеса и подтверждённые результаты.'}</p></div></div>
         {!business && <div className="team-summary"><span className="profile-badge">{activeTeam.initials}</span><div><h2>{activeTeam.name}</h2><p>{activeTeam.skills}</p><p className="help">Интересы: {activeTeam.interests}</p></div><div className="team-points"><strong>{proposals.filter(p => p.teamId === team && p.milestone).length * 20}</strong><span>баллов за результат</span></div></div>}
         <div className="status-filters" aria-label="Статус откликов">{proposalFilters.map(filter => <button key={filter.value} aria-pressed={proposalFilter === filter.value} onClick={() => setProposalFilter(filter.value)}>{filter.label}<span>{filter.value === 'all' ? ownProposals.length : ownProposals.filter(p => offerStatus(p) === filter.value).length}</span></button>)}</div>
-        {shownProposals.length ? <div className="proposals-list">{shownProposals.map(renderProposal)}</div> : <div className="empty-state"><FileText size={26} /><h2>Нет откликов в этом разделе</h2><p>{proposalFilter !== 'all' ? 'Выберите другой статус или покажите все отклики.' : business ? 'После публикации задачи команды смогут предложить решение.' : 'Выберите задачу в каталоге и предложите свой подход.'}</p><Button variant="outline" onClick={() => proposalFilter !== 'all' ? setProposalFilter('all') : setTab('catalog')}>{proposalFilter !== 'all' ? 'Все отклики' : 'В каталог'}</Button></div>}
+        {business && shownProposals.length > 0 && <div className="comparison-toggle"><Button variant="outline" onClick={() => setCompare(value => !value)}>{compare ? 'Карточки предложений' : 'Сравнить в таблице'}</Button><span className="help">Выбор всегда остаётся за вами</span></div>}
+        {business && compare && shownProposals.length > 0 ? <div className="comparison-table"><table><thead><tr><th>Команда / задача</th><th>Идея и план</th><th>Срок / прототип</th><th>Решение</th></tr></thead><tbody>{shownProposals.map(p => <tr key={p.id}><td><b>{teams.find(t => t.id === p.teamId)?.name}</b><p>{tasks.find(t => t.id === p.taskId)?.title}</p></td><td><b>{p.idea}</b><p>{p.plan}</p></td><td>{p.term}<br /><a href={p.link} target="_blank" rel="noopener noreferrer">Открыть прототип ↗</a></td><td><span className={'status '+p.status}>{p.milestone ? 'Этап подтверждён' : p.status === 'chosen' ? 'Выбрана' : p.status === 'rejected' ? 'Отклонена' : 'На рассмотрении'}</span>{!p.milestone && <div className="comparison-actions"><Button size="sm" disabled={busy || p.status === 'chosen'} onClick={() => void decide(p, 'chosen')}>Выбрать</Button><Button size="sm" variant="outline" disabled={busy || p.status === 'rejected'} onClick={() => void decide(p, 'rejected')}>Отклонить</Button></div>}</td></tr>)}</tbody></table></div> : shownProposals.length ? <div className="proposals-list">{shownProposals.map(renderProposal)}</div> : <div className="empty-state"><FileText size={26} /><h2>Нет откликов в этом разделе</h2><p>{proposalFilter !== 'all' ? 'Выберите другой статус или покажите все отклики.' : business ? 'После публикации задачи команды смогут предложить решение.' : 'Выберите задачу в каталоге и предложите свой подход.'}</p><Button variant="outline" onClick={() => proposalFilter !== 'all' ? setProposalFilter('all') : setTab('catalog')}>{proposalFilter !== 'all' ? 'Все отклики' : 'В каталог'}</Button></div>}
       </>}
-      {tab === 'guide' && <section className="surface reading"><div className="section-label">СПРАВКА</div><h1 id="page-title" tabIndex={-1}>Как работать с платформой</h1><h2>Бизнес: от запроса до исполнителя</h2><ol><li>Создайте задачу и опишите проблему. Помощник задаст уточняющие вопросы.</li><li>Заполните карточку. Можно оставить неизвестные сведения открытыми.</li><li>Проверьте данные, подтвердите их и опубликуйте задачу.</li><li>Сравните отклики. Выберите одну, несколько команд или оставьте запрос без исполнителя.</li><li>После фактической проверки результата подтвердите этап. Команда получит 20 баллов.</li></ol><h2>Команда: от задачи до результата</h2><p>Откройте любую опубликованную задачу. Отправьте идею, план, срок и ссылку на прототип. Все предложения доступны бизнесу, автоматического назначения нет. Низкий рейтинг задачи не запрещает отклик.</p><h2>Что означает готовность</h2><p>Рейтинг оценивает полноту подтверждённого описания. Он не доказывает качество идеи или достоверность данных. Поле засчитывается при ответе от 8 символов; «не знаю» и другие простые заглушки не засчитываются.</p><div className="rating-table">{fieldDefs.map(field => <div key={field.key}><span>{field.label}</span><b>{field.points}</b></div>)}</div><h2>Учебная версия</h2><p>Вверху можно переключать роли и команды. Организации, контакты и примеры вымышленные. Данные хранятся в рабочем пространстве текущего браузера; другой браузер получает отдельный набор. Ссылки example.com служат примерами и не ведут к рабочим прототипам.</p><p>Незавершённая карточка сохраняется в текущей вкладке и восстанавливается после обновления страницы. Для постоянного хранения нажмите «Сохранить черновик». Перед публикацией подтверждение всегда требуется заново.</p><h2>Помощник и данные</h2><p>{aiNotice(ai, null)} Помощник предлагает вопросы, а формулировки карточки и решение о выборе команды остаются за человеком. При сбое используются резервные вопросы с явным уведомлением.</p></section>}
+      {tab === 'guide' && <section className="surface reading"><div className="section-label">СПРАВКА</div><h1 id="page-title" tabIndex={-1}>Как работать с платформой</h1><h2>Бизнес: от запроса до исполнителя</h2><ol><li>Создайте задачу и опишите проблему. Помощник задаст уточняющие вопросы.</li><li>Заполните карточку. Можно оставить неизвестные сведения открытыми.</li><li>Проверьте данные, подтвердите их и опубликуйте задачу.</li><li>Сравните отклики. Выберите одну, несколько команд или оставьте запрос без исполнителя.</li><li>Дождитесь отчёта команды и после фактической проверки подтвердите этап. Команда получит 20 баллов один раз.</li></ol><h2>Команда: от задачи до результата</h2><p>Откройте любую опубликованную задачу. Отправьте идею, план, срок и ссылку на прототип. Все предложения доступны бизнесу, автоматического назначения нет. Низкий рейтинг задачи не запрещает отклик.</p><h2>Что означает готовность</h2><p>Рейтинг оценивает полноту подтверждённого описания. Он не доказывает качество идеи или достоверность данных. Поле засчитывается при ответе от 8 символов; «не знаю» и другие простые заглушки не засчитываются.</p><div className="rating-table">{fieldDefs.map(field => <div key={field.key}><span>{field.label}</span><b>{field.points}</b></div>)}</div><h2>Учебная версия</h2><p>Для бизнеса и команд доступны отдельные аккаунты. Опубликованные задачи общие для всех участников. Черновики и управление доступны только бизнесу; команда видит только свои отклики. Организации, контакты и начальные примеры вымышленные. Ссылки example.com служат примерами и не ведут к рабочим прототипам.</p><p>Незавершённая карточка сохраняется в текущей вкладке и восстанавливается после обновления страницы. Для постоянного хранения нажмите «Сохранить черновик». Перед публикацией подтверждение всегда требуется заново.</p><h2>Помощник и данные</h2><p>{aiNotice(ai, null)} Помощник предлагает вопросы, а формулировки карточки и решение о выборе команды остаются за человеком. При сбое используются резервные вопросы с явным уведомлением.</p></section>}
       <footer className="footer-note"><span>AI Sana Challenge Hub <span className="footer-divider">/</span> МНВО</span><span>Учебная среда · {ai?.enabled && ai.keyConfigured ? 'OpenAI подключён' : 'Помощник в демо-режиме'}</span></footer>
     </main>
     <Sheet open={!!task} onOpenChange={open => { if (!open) closeTask(); }}><SheetContent className="task-sheet" onEscapeKeyDown={event => { if (busy) event.preventDefault(); }} onPointerDownOutside={event => { if (busy) event.preventDefault(); }}>
@@ -267,7 +299,7 @@ export default function Home() {
         </fieldset></form>}
       </div>}
     </SheetContent></Sheet>
-    <Dialog open={!!milestone} onOpenChange={open => { if (!open && !busy) { setMilestone(null); setError(''); } }}><DialogContent><DialogHeader><DialogTitle>Подтвердить фактический результат</DialogTitle><DialogDescription>Опишите выполненный этап и результат проверки. Команда получит 20 баллов один раз за этот отклик.</DialogDescription></DialogHeader>{errorNotice}<label htmlFor="evidence" className="field-label">Результат и подтверждение</label><Textarea id="evidence" disabled={busy} value={evidence} maxLength={1500} placeholder="Что проверено и с каким результатом?" onChange={e => setEvidence(e.target.value)} /><Button disabled={busy || !isFilled(evidence)} onClick={() => void confirmMilestone()}>{busy ? 'Сохраняем…' : 'Подтвердить и начислить баллы'}</Button></DialogContent></Dialog>
+    <Dialog open={!!milestone} onOpenChange={open => { if (!open && !busy) { setMilestone(null); setError(''); } }}><DialogContent><DialogHeader><DialogTitle>{business ? 'Подтвердить фактический результат' : 'Отправить результат этапа'}</DialogTitle><DialogDescription>{business ? 'Проверьте отчёт команды и опишите результат проверки. За подтверждённый этап начисляется 20 баллов один раз.' : 'Опишите выполненную работу, измеримый результат и добавьте ссылку на демонстрацию. Баллы появятся после проверки бизнесом.'}</DialogDescription></DialogHeader>{errorNotice}<label htmlFor="evidence" className="field-label">Результат и подтверждение</label><Textarea id="evidence" disabled={busy} value={evidence} maxLength={1500} placeholder="Что проверено и с каким результатом?" onChange={e => setEvidence(e.target.value)} /><Button disabled={busy || !isFilled(evidence)} onClick={() => void confirmMilestone()}>{busy ? 'Сохраняем…' : business ? 'Подтвердить и начислить баллы' : 'Отправить на проверку'}</Button></DialogContent></Dialog>
     <Dialog open={!!pendingAction} onOpenChange={open => { if (!open) setPendingAction(null); }}><DialogContent onOpenAutoFocus={event => { event.preventDefault(); document.getElementById("keep-editing")?.focus(); }}><DialogHeader><DialogTitle>Есть несохранённые изменения</DialogTitle><DialogDescription>{pendingAction?.message}</DialogDescription></DialogHeader><div className="actions"><Button variant="outline" onClick={() => { const action = pendingAction?.action; setPendingAction(null); action?.(); }}>Продолжить без сохранения</Button><Button id="keep-editing" onClick={() => setPendingAction(null)}>Остаться</Button></div></DialogContent></Dialog>
   </div>;
 }

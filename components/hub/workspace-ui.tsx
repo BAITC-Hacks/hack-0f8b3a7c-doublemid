@@ -32,7 +32,7 @@ export function TaskList({ tasks, proposals, onOpen, disabled }: { tasks: Task[]
   return <div className="task-register">
     <div className="register-head" aria-hidden="true"><span>Задача / организация</span><span>Направление</span><span>Готовность</span><span>Отклики</span><span /></div>
     <ul className="task-list" aria-label="Список задач">{tasks.map(task => {
-      const count = proposals.filter(p => p.taskId === task.id).length;
+      const count = task.proposalCount ?? proposals.filter(p => p.taskId === task.id).length;
       return <li key={task.id}><button disabled={disabled} className="task-row" aria-label={'Открыть задачу: ' + task.title} onClick={() => onOpen(task.id)}>
         <span className="task-main"><span className="task-title">{task.title}</span><span className="task-org">{task.org || 'Организация не указана'}</span><span className="task-summary">{task.need || task.context || task.draft}</span></span>
         <span className="topic-label">{task.topic}</span>
@@ -53,10 +53,12 @@ export function ProposalCard({ proposal: p, task, business, busy, onOpen, onDeci
     <button className="task-reference" disabled={busy} onClick={() => onOpen(p.taskId)}>{task?.title}</button>
     <dl className="proposal-details"><div><dt>Идея</dt><dd>{p.idea}</dd></div><div><dt>План</dt><dd>{p.plan}</dd></div></dl>
     <div className="proposal-meta"><span>Срок: <b>{p.term}</b></span><a href={p.link} target="_blank" rel="noopener noreferrer">Прототип <ExternalLink size={14} aria-hidden="true" /><span className="sr-only"> (откроется в новой вкладке)</span></a></div>
+    {p.evidenceSubmittedAt && !p.milestone && <div className="result-note"><FileCheck2 size={18} /><div><b>Результат отправлен на проверку</b><p>{p.evidence}</p></div></div>}
     {p.milestone && <div className="result-note"><FileCheck2 size={18} aria-hidden="true" /><div><b>Этап подтверждён · +20 баллов</b><p>{p.evidence}</p></div></div>}
     {business && !p.milestone && <div className="actions">
       {p.status !== 'rejected' && <Button variant="outline" disabled={busy} onClick={() => onDecide(p, 'rejected')}>Отклонить</Button>}
-      {p.status !== 'chosen' ? <Button disabled={busy} onClick={() => onDecide(p, 'chosen')}><Check size={16} />Выбрать команду</Button> : <Button disabled={busy} onClick={() => onMilestone(p.id)}>Подтвердить этап</Button>}
+      {p.status !== 'chosen' ? <Button disabled={busy} onClick={() => onDecide(p, 'chosen')}><Check size={16} />Выбрать команду</Button> : <Button disabled={busy || !p.evidenceSubmittedAt} onClick={() => onMilestone(p.id)}>{p.evidenceSubmittedAt ? 'Проверить и подтвердить этап' : 'Ожидаем результат команды'}</Button>}
     </div>}
+    {!business && p.status === 'chosen' && !p.milestone && <div className="actions"><Button disabled={busy} onClick={() => onMilestone(p.id)}>{p.evidenceSubmittedAt ? 'Уточнить отчёт' : 'Отправить результат этапа'}</Button></div>}
   </article>;
 }

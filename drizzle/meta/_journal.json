@@ -8,6 +8,13 @@
       "when": 1790153114285,
       "tag": "0000_keen_iron_lad",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790166554789,
+      "tag": "0001_accounts",
+      "breakpoints": true
     }
   ]
 }
